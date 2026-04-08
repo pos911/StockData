@@ -1,0 +1,20 @@
+[
+  {
+    "symbol": "005930",
+    "name": "삼성전자",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "000660",
+    "name": "SK하이닉스",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "042700",
+    "name": "한미반도체",
+    "market": "KOSPI",
+    "enabled": false
+  }
+]

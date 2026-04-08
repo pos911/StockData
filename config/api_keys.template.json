@@ -1,0 +1,31 @@
+{
+  "kis": {
+    "app_key": "YOUR_KIS_APP_KEY_HERE",
+    "app_secret": "YOUR_KIS_APP_SECRET_HERE",
+    "account_no": "YOUR_ACCOUNT_NUMBER",
+    "product_code": "01"
+  },
+  "krx": {
+    "auth_key": "YOUR_KRX_AUTH_KEY_HERE"
+  },
+  "opendart": {
+    "api_key": "YOUR_OPENDART_API_KEY_HERE"
+  },
+  "fred": {
+    "api_key": "YOUR_FRED_API_KEY_HERE"
+  },
+  "trading_economics": {
+    "client_key": "YOUR_TE_CLIENT_KEY_HERE"
+  },
+  "naver": {
+    "client_id": "YOUR_NAVER_CLIENT_ID_HERE",
+    "client_secret": "YOUR_NAVER_CLIENT_SECRET_HERE"
+  },
+  "supabase": {
+    "url": "https://YOUR_PROJECT.supabase.co",
+    "publishable_key": "YOUR_SUPABASE_ANON_KEY",
+    "service_role_key": "YOUR_SUPABASE_SERVICE_ROLE_KEY",
+    "database_password": "YOUR_DB_PASSWORD",
+    "connection_string": "postgresql://postgres:PASSWORD@db.PROJECT_REF.supabase.co:5432/postgres"
+  }
+}

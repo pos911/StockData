@@ -1,0 +1,23 @@
+[
+  {
+    "source": "FRED",
+    "series_id": "DGS10",
+    "name": "Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "FRED",
+    "series_id": "DTWEXBGS",
+    "name": "Trade Weighted U.S. Dollar Index: Broad, Goods and Services",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "TradingEconomics",
+    "endpoint_key": "south_korea_interest_rate",
+    "name": "South Korea Interest Rate",
+    "frequency": "Monthly",
+    "enabled": false
+  }
+]
