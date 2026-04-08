@@ -42,6 +42,28 @@ class StockNormalizer:
         }
 
     @staticmethod
+    def normalize_kis_history(raw_data: List[Dict[str, Any]], symbol: str, available_at: datetime) -> List[Dict[str, Any]]:
+        """KIS 기간별 시세 응답(List)을 정규화"""
+        normalized = []
+        for item in raw_data:
+            base_date = item.get("stck_bsop_date")
+            if base_date:
+                # YYYYMMDD -> YYYY-MM-DD
+                formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}"
+                normalized.append({
+                    "symbol": symbol,
+                    "base_date": formatted_date,
+                    "open_price": float(item.get("stck_oprc", 0)),
+                    "high_price": float(item.get("stck_hgpr", 0)),
+                    "low_price": float(item.get("stck_lwpr", 0)),
+                    "close_price": float(item.get("stck_prpr", 0)),
+                    "volume": float(item.get("acml_vol", 0)),
+                    "trading_value": float(item.get("acml_tr_pbmn", 0)),
+                    "available_at": available_at.isoformat()
+                })
+        return normalized
+
+    @staticmethod
     def normalize_stock_master(symbol: str, name: str, market: str) -> Dict[str, Any]:
         """stocks_master 테이블 형식으로 변환"""
         return {

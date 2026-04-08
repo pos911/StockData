@@ -38,7 +38,32 @@ def check_data_status():
             for sid, sinfo in stats.items():
                 logger.info(f"Series: {sid} | Count: {sinfo['count']} | Range: {sinfo['min_date']} ~ {sinfo['max_date']}")
 
-        # 2. 파이프라인 로그 확인
+        # 2. 주식 데이터 요약
+        stock_summary = supabase.table("normalized_stock_prices_daily") \
+            .select("symbol, base_date") \
+            .order("base_date", desc=True) \
+            .limit(30000) \
+            .execute()
+        s_data = stock_summary.data
+        
+        if s_data:
+            s_stats = {}
+            for row in s_data:
+                sym = row['symbol']
+                bdate = row['base_date']
+                if sym not in s_stats:
+                    s_stats[sym] = {"count": 0, "min_date": bdate, "max_date": bdate}
+                s_stats[sym]["count"] += 1
+                s_stats[sym]["min_date"] = min(s_stats[sym]["min_date"], bdate)
+                s_stats[sym]["max_date"] = max(s_stats[sym]["max_date"], bdate)
+            
+            logger.info("--- Stock Data Statistics (Sample) ---")
+            for sym, sinfo in list(s_stats.items())[:5]: # 너무 많으면 상위 5개만
+                logger.info(f"Symbol: {sym} | Count: {sinfo['count']} | Range: {sinfo['min_date']} ~ {sinfo['max_date']}")
+            logger.info(f"Total Unique Stocks in DB: {len(s_stats)}")
+            logger.info(f"Total Stock Price Records: {len(s_data)}")
+
+        # 3. 파이프라인 로그 확인
         logs = supabase.table("pipeline_run_logs").select("*").order("start_time", desc=True).limit(5).execute()
         logger.info("--- Recent Pipeline Logs ---")
         for log in logs.data:

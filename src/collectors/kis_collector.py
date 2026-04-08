@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from src.utils.logger import get_logger
 from src.utils.http_client import HttpClient
 
@@ -122,5 +122,34 @@ class KISCollector:
     def place_order(self, symbol: str, quantity: int, price: int, side: str = "BUY") -> Optional[Dict[str, Any]]:
         """주식 주문 전송 (인터페이스 스켈레톤)"""
         logger.info(f"Placing {side} order for {symbol}: {quantity} shares @ {price} KRW")
-        # 실제 구현 시 tr_id: TTTC0802U (매수), TTTC0801U (매도) 등 사용 필요
-        return {"status": "success", "order_no": "DUMMY_12345"}
+    def fetch_ohlcv_history(self, symbol: str, start_date: str, end_date: str) -> Optional[List[Dict[str, Any]]]:
+        """국내주식 기간별 시세 조회 (FHKST03010100)"""
+        if not self.access_token:
+            if not self.authenticate():
+                return None
+                
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {self.access_token}",
+            "appkey": self.api_key,
+            "appsecret": self.api_secret,
+            "tr_id": "FHKST03010100" # 기간별 시세/일별 차트 조회
+        }
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_DATE_1": start_date.replace("-", ""),
+            "FID_INPUT_DATE_2": end_date.replace("-", ""),
+            "FID_PERIOD_DIV_CODE": "D", # 일봉
+            "FID_ORG_ADJ_PRC": "1"  # 수정주가 적용
+        }
+        
+        logger.info(f"Fetching KIS historical OHLCV for {symbol} ({start_date} ~ {end_date})...")
+        res = self.client.get(url, params=params, headers=headers)
+        
+        if res and res.get("rt_cd") == "0":
+            return res.get("output2") # output2가 일별 데이터 리스트
+            
+        logger.error(f"Failed to fetch KIS history for {symbol}: {res}")
+        return None

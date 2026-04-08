@@ -2,7 +2,7 @@ name: Daily Data Sync
 
 on:
   schedule:
-    - cron: '0 */3 * * *' # 매 3시간마다 실행
+    - cron: '0 1,4,7,10,13,16,19,22 * * *' # KST 10, 13, 16, 19, 22, 01, 04, 07시 실행
   workflow_dispatch: # 수동 실행 지원
 
 jobs:
