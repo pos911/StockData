@@ -18,6 +18,24 @@
     "enabled": true
   },
   {
+    "symbol": "017670",
+    "name": "SK텔레콤",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "222800",
+    "name": "심텍",
+    "market": "KOSDAQ",
+    "enabled": true
+  },
+  {
+    "symbol": "004020",
+    "name": "현대제철",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
     "symbol": "005380",
     "name": "현대차",
     "market": "KOSPI",

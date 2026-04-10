@@ -56,7 +56,7 @@ class StockNormalizer:
                     "open_price": float(item.get("stck_oprc", 0)),
                     "high_price": float(item.get("stck_hgpr", 0)),
                     "low_price": float(item.get("stck_lwpr", 0)),
-                    "close_price": float(item.get("stck_prpr", 0)),
+                    "close_price": float(item.get("stck_clpr", 0)),
                     "volume": float(item.get("acml_vol", 0)),
                     "trading_value": float(item.get("acml_tr_pbmn", 0)),
                     "available_at": available_at.isoformat()

@@ -184,3 +184,50 @@ class KISCollector:
         except Exception as e:
             logger.error(f"Error bulk fetching supply for {symbol} via KIS: {e}")
             return results
+
+    def fetch_ohlcv_history(self, symbol: str, start_date_str: str, end_date_str: str) -> List[Dict[str, Any]]:
+        """특정 기간의 일자별 시세(OHLCV) 이력 조회 (FHKST03010100)"""
+        results = []
+        try:
+            token = self._get_token()
+            url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+            
+            headers = {
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "tr_id": "FHKST03010100",
+                "custtype": "P"
+            }
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_DATE_1": start_date_str,
+                "FID_INPUT_DATE_2": end_date_str,
+                "FID_PERIOD_DIV_CODE": "D",
+                "FID_ORG_ADJ_PRC": "0" # 0:수정주가 미적용, 1:수정주가 적용 (보통 1 권장하지만 스펙 확인 필요)
+            }
+            
+            # Note: We use 1 (Adjusted Price) for clear backtesting
+            params["FID_ORG_ADJ_PRC"] = "1"
+            
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if "output2" in data:
+                    for row in data["output2"]:
+                        results.append({
+                            "symbol": symbol,
+                            "base_date": row.get("stck_bsop_date"),
+                            "open": int(row.get("stck_oprc", 0)),
+                            "high": int(row.get("stck_hgpr", 0)),
+                            "low": int(row.get("stck_lwpr", 0)),
+                            "close": int(row.get("stck_clpr", 0)),
+                            "volume": int(row.get("acml_vol", 0)),
+                            "trading_value": int(row.get("acml_tr_pbmn", 0))
+                        })
+            return results
+        except Exception as e:
+            logger.error(f"Error fetching OHLCV history for {symbol}: {e}")
+            return results

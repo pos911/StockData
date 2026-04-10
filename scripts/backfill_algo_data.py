@@ -9,6 +9,7 @@ from src.utils.config_loader import load_config
 from src.loaders.supabase_loader import SupabaseLoader
 from src.collectors.kis_collector import KISCollector
 from src.collectors.global_index_collector import GlobalIndexCollector
+from src.normalizers.stock_normalizer import StockNormalizer
 
 logger = get_logger(__name__)
 
@@ -34,6 +35,36 @@ def backfill_algo_data(days: int = 365):
     enabled_stocks = [s for s in universe if s.get("enabled", False)]
     for stock in enabled_stocks:
         symbol = stock["symbol"]
+        name = stock["name"]
+        logger.info(f"Processing backfill for {name} ({symbol})...")
+        
+        # 1.1 Price History Backfill (FinanceDataReader)
+        try:
+            import FinanceDataReader as fdr
+            logger.info(f"Fetching price history for {symbol} via FDR...")
+            df = fdr.DataReader(symbol, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+            if not df.empty:
+                records = []
+                for idx, row in df.iterrows():
+                    dt_str = idx.strftime("%Y-%m-%d")
+                    available_at = datetime.combine(idx.date(), datetime.min.time().replace(hour=18)).isoformat()
+                    records.append({
+                        "symbol": symbol,
+                        "base_date": dt_str,
+                        "open_price": float(row.get("Open", 0)),
+                        "high_price": float(row.get("High", 0)),
+                        "low_price": float(row.get("Low", 0)),
+                        "close_price": float(row.get("Close", 0)),
+                        "volume": float(row.get("Volume", 0)),
+                        "trading_value": float(row.get("Amount", 0)) if "Amount" in row else 0,
+                        "available_at": available_at
+                    })
+                loader.upsert_records("normalized_stock_prices_daily", records)
+                logger.info(f"Upserted {len(records)} price records for {symbol}")
+        except Exception as e:
+            logger.error(f"Error backfilling price for {symbol}: {e}")
+
+        # 1.2 Stock Supply Backfill (KIS API)
         logger.info(f"Bulk backfilling supply history for {symbol}...")
         try:
             # Scrape recent history from KIS API
