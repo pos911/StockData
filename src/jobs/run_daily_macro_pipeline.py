@@ -80,6 +80,28 @@ def run_pipeline(target_date: date):
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
 
+    # 파생 매크로 (Global Index) 수집 및 적재 
+    from src.collectors.global_index_collector import GlobalIndexCollector
+    global_index = GlobalIndexCollector()
+    global_data = global_index.fetch_daily_indices(target_date)
+    if global_data:
+        global_record = {
+            "base_date": global_data.get("base_date"),
+            "usdkrw": global_data.get("usdkrw"),
+            "dxy": global_data.get("dxy"),
+            "us10y": global_data.get("us10y"),
+            "kr10y": global_data.get("kr10y"),
+            "wti": global_data.get("wti"),
+            "brent": global_data.get("brent"),
+            "nasdaq": global_data.get("nasdaq"),
+            "sp500": global_data.get("sp500"),
+            "sox": global_data.get("sox"),
+            "vix": global_data.get("vix"),
+            "available_at": available_at.isoformat()
+        }
+        loader.upsert_records("normalized_global_macro_daily", [global_record])
+        total_processed += 1
+
     loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
     logger.info("Macro Pipeline Finished.")
 

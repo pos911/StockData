@@ -74,3 +74,21 @@ class OpenDartCollector:
         if res and res.get("status") == "000":
             return res.get("list")
         return []
+
+    def parse_events(self, symbol: str, base_date: str, disclosures: list) -> list:
+        """
+        공시 내역을 기반으로 중요한 이벤트를 구조화 및 점수화
+        (rights_issue, earnings, mna, contract, buyback 등)
+        """
+        events = []
+        for d in disclosures:
+            title = d.get("report_nm", "")
+            if "유상증자" in title:
+                events.append({"symbol": symbol, "base_date": base_date, "event_type": "rights_issue", "event_score": -0.8, "sentiment_score": -0.5})
+            elif "영업실적" in title or "결산실적" in title:
+                events.append({"symbol": symbol, "base_date": base_date, "event_type": "earnings", "event_score": 0.5, "sentiment_score": 0.3})
+            elif "단일판매" in title or "공급계약" in title:
+                events.append({"symbol": symbol, "base_date": base_date, "event_type": "contract", "event_score": 0.6, "sentiment_score": 0.7})
+            elif "자기주식" in title:
+                events.append({"symbol": symbol, "base_date": base_date, "event_type": "buyback", "event_score": 0.7, "sentiment_score": 0.8})
+        return events

@@ -81,7 +81,7 @@ def run_pipeline(target_date: date):
             loader.upsert_records("normalized_stock_prices_daily", [kis_norm])
             total_processed += 1
 
-        # 6. OpenDart 공시 수집
+        # 6. OpenDart 공시 수집 및 이벤트 추출
         corp_code = corp_code_map.get(symbol)
         if corp_code:
             disclosures = opendart_collector.fetch_daily_disclosures(corp_code, target_date.strftime("%Y-%m-%d"))
@@ -97,6 +97,22 @@ def run_pipeline(target_date: date):
                         "available_at": timestamp_now.isoformat()
                     })
                 loader.upsert_records("raw_disclosures", disclosure_records)
+                
+                # 이벤트 추출 및 적재
+                events = opendart_collector.parse_events(symbol, target_date.strftime("%Y-%m-%d"), disclosures)
+                if events:
+                    event_records = []
+                    for e in events:
+                        event_records.append({
+                            "symbol": e["symbol"],
+                            "base_date": e["base_date"],
+                            "event_type": e["event_type"],
+                            "event_score": e["event_score"],
+                            "sentiment_score": e["sentiment_score"],
+                            "available_at": timestamp_now.isoformat()
+                        })
+                    if event_records:
+                        loader.upsert_records("normalized_stock_events_daily", event_records)
 
         # 7. Naver 뉴스 수집 (Raw 레이어의 disclosures와 통합 저장하거나 별도 관리 가능)
         news_data = naver_collector.fetch_news(f"{name} {symbol}")
@@ -113,7 +129,7 @@ def run_pipeline(target_date: date):
                 })
             loader.upsert_records("raw_disclosures", news_records)
 
-        # 8. KRX 데이터 수집 (Raw & Normalized)
+        # 8. KRX 데이터 수집 (Raw & Normalized & 수급)
         if skip_krx:
             continue
             
@@ -137,6 +153,35 @@ def run_pipeline(target_date: date):
         norm_data = StockNormalizer.normalize_krx_daily(raw_data, available_at)
         loader.upsert_records("normalized_stock_prices_daily", [norm_data])
         
+        # 수급 데이터 (Supply) 처리
+        supply_data = krx_collector.fetch_daily_investor_supply(symbol, target_date)
+        if supply_data:
+            # Raw Supply
+            raw_supply_record = {
+                "source": "KRX_Supply",
+                "symbol": symbol,
+                "base_date": target_date.strftime("%Y-%m-%d"),
+                "raw_data": json.dumps(supply_data),
+                "collected_at": timestamp_now.isoformat(),
+                "available_at": available_at.isoformat()
+            }
+            loader.upsert_records("raw_stock_supply_daily", [raw_supply_record])
+            
+            # Normalized Supply
+            norm_supply = {
+                "symbol": symbol,
+                "base_date": target_date.strftime("%Y-%m-%d"),
+                "foreign_net_buy": supply_data.get("foreign_net_buy"),
+                "institutional_net_buy": supply_data.get("institutional_net_buy"),
+                "individual_net_buy": supply_data.get("individual_net_buy"),
+                "foreign_holding_ratio": supply_data.get("foreign_holding_ratio"),
+                "short_volume": supply_data.get("short_volume"),
+                "short_balance": supply_data.get("short_balance"),
+                "lending_balance": supply_data.get("lending_balance"),
+                "available_at": available_at.isoformat()
+            }
+            loader.upsert_records("normalized_stock_supply_daily", [norm_supply])
+
         total_processed += 1
 
     # 6. 로깅

@@ -1,4 +1,4 @@
-# Supabase 스키마 
+-- Supabase 스키마 
 
 -- 1. 마스터 테이블 (종목/매크로 메타 관리)
 CREATE TABLE IF NOT EXISTS stocks_master (
@@ -110,4 +110,58 @@ CREATE TABLE IF NOT EXISTS pipeline_run_logs (
     end_time TIMESTAMP WITH TIME ZONE,
     records_processed INT DEFAULT 0,
     error_message TEXT
+);
+
+-- 6. Algorithmic Trading Extension (Supply, Macro, Derivatives, Events)
+CREATE TABLE IF NOT EXISTS normalized_stock_supply_daily (
+    symbol VARCHAR(20),
+    base_date DATE,
+    foreign_net_buy NUMERIC,
+    institutional_net_buy NUMERIC,
+    individual_net_buy NUMERIC,
+    foreign_holding_ratio NUMERIC,
+    short_volume NUMERIC,
+    short_balance NUMERIC,
+    lending_balance NUMERIC,
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, base_date)
+);
+
+CREATE TABLE IF NOT EXISTS normalized_global_macro_daily (
+    base_date DATE PRIMARY KEY,
+    usdkrw NUMERIC,
+    dxy NUMERIC,
+    us10y NUMERIC,
+    kr10y NUMERIC,
+    wti NUMERIC,
+    brent NUMERIC,
+    nasdaq NUMERIC,
+    sp500 NUMERIC,
+    sox NUMERIC,
+    vix NUMERIC,
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS normalized_derivatives_daily (
+    base_date DATE PRIMARY KEY,
+    kospi200_futures NUMERIC,
+    futures_basis NUMERIC,
+    open_interest NUMERIC,
+    night_futures_return NUMERIC,
+    expiration_flag BOOLEAN,
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS normalized_stock_events_daily (
+    symbol VARCHAR(20),
+    base_date DATE,
+    event_type VARCHAR(50),
+    event_score NUMERIC,
+    sentiment_score NUMERIC,
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, base_date, event_type)
 );
