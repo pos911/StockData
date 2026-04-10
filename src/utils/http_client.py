@@ -45,11 +45,19 @@ class HttpClient:
     def get(self, url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         response = self.request("GET", url, params=params, headers=headers)
         if response is not None:
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                # HTML 등 JSON이 아닌 경우엔 조용히 리턴 (세션 확보용 등)
+                return None
         return None
 
     def post(self, url: str, data: Optional[Dict[str, Any]] = None, json: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         response = self.request("POST", url, data=data, json=json, headers=headers)
         if response is not None:
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                logger.error(f"Failed to parse JSON from {url}")
+                return None
         return None

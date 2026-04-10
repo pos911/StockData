@@ -1,155 +1,138 @@
-import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, Any, Optional, List
+import requests
+import json
+import time
+
 from src.utils.logger import get_logger
 from src.utils.http_client import HttpClient
 
 logger = get_logger(__name__)
 
 class KISCollector:
-    """한국투자증권 OpenAPI 수집기"""
-    def __init__(self, api_key: str, api_secret: str, account_no: str):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.account_no = account_no
-        self.client = HttpClient()
+    """한국투자증권(KIS) Open API 기반 수집기"""
+    def __init__(self, config: Dict[str, str]):
+        self.app_key = config.get("app_key", "")
+        self.app_secret = config.get("app_secret", "")
         self.base_url = "https://openapi.koreainvestment.com:9443"
-        self.token_file = "config/kis_token.json"
-        self.access_token = self._load_token()
+        self.client = HttpClient()
+        self._access_token = None
+        self._token_expires_at = 0
 
-    def _load_token(self) -> Optional[str]:
-        """파일에서 기존 토큰 로드"""
-        try:
-            import os
-            if os.path.exists(self.token_file):
-                with open(self.token_file, "r") as f:
-                    data = json.load(f)
-                    # 유효기간 검증 로직은 추후 추가 (현재는 단순히 로드)
-                    return data.get("access_token")
-        except Exception:
-            pass
-        return None
-
-    def _save_token(self, token: str):
-        """환경설정 파일에 토큰 저장"""
-        try:
-            with open(self.token_file, "w") as f:
-                json.dump({"access_token": token, "updated_at": datetime.now().isoformat()}, f)
-        except Exception as e:
-            logger.error(f"Failed to save KIS token: {e}")
-
-        if not self.api_key or self.api_key.startswith("YOUR_"):
-            logger.warning("KIS API Key가 설정되지 않았습니다. 실제 호출은 실패합니다.")
-
-    def authenticate(self) -> bool:
-        """인증 토큰 발급 (/oauth2/tokenP)"""
-        if not self.api_key or self.api_key.startswith("YOUR_"):
-            return False
-        
-        url = f"{self.base_url}/oauth2/tokenP"
-        payload = {
-            "grant_type": "client_credentials",
-            "appkey": self.api_key,
-            "appsecret": self.api_secret
-        }
-        headers = {"content-type": "application/json"}
-        
-        logger.info("Requesting KIS Access Token...")
-        res = self.client.post(url, json=payload, headers=headers)
-        
-        if res and "access_token" in res:
-            self.access_token = res["access_token"]
-            self._save_token(self.access_token)
-            logger.info("KIS Access Token acquired successfully.")
-            return True
-        
-        logger.error(f"Failed to acquire KIS Access Token: {res}")
-        return False
-
-    def fetch_stock_price(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """주식 현재가 및 기본 정보 조회 (/uapi/domestic-stock/v1/quotations/inquire-price)"""
-        if not self.access_token:
-            if not self.authenticate():
-                return None
-                
-        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {self.access_token}",
-            "appkey": self.api_key,
-            "appsecret": self.api_secret,
-            "tr_id": "FHKST01010100" # 주식현재가 시세 조회 ID
-        }
-        params = {
-            "fid_cond_mrkt_div_code": "J", # 주식, 상장지수펀드 등
-            "fid_input_iscd": symbol
-        }
-        
-        logger.info(f"Fetching KIS stock price for {symbol}...")
-        res = self.client.get(url, params=params, headers=headers)
-        
-        if res and res.get("rt_cd") == "0":
-            return res.get("output")
-        
-        logger.error(f"Failed to fetch KIS stock price for {symbol}: {res}")
-        return None
-
-    def fetch_balance(self) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 예수금 현황 조회 (/uapi/domestic-stock/v1/trading/inquire-balance)"""
-        if not self.access_token:
-            if not self.authenticate():
-                return None
-        
-        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {self.access_token}",
-            "appkey": self.api_key,
-            "appsecret": self.api_secret,
-            "tr_id": "TTTC8434R" # 실전 투자 주식잔고조회 TR ID
-        }
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": "01",
-            "AFHR_FLG": "N",
-            "OVR_RE_REQS_GW_YN": "N"
-        }
-        
-        logger.info("Fetching KIS account balance...")
-        res = self.client.get(url, params=params, headers=headers)
-        return res
-
-    def place_order(self, symbol: str, quantity: int, price: int, side: str = "BUY") -> Optional[Dict[str, Any]]:
-        """주식 주문 전송 (인터페이스 스켈레톤)"""
-        logger.info(f"Placing {side} order for {symbol}: {quantity} shares @ {price} KRW")
-    def fetch_ohlcv_history(self, symbol: str, start_date: str, end_date: str) -> Optional[List[Dict[str, Any]]]:
-        """국내주식 기간별 시세 조회 (FHKST03010100)"""
-        if not self.access_token:
-            if not self.authenticate():
-                return None
-                
-        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {self.access_token}",
-            "appkey": self.api_key,
-            "appsecret": self.api_secret,
-            "tr_id": "FHKST03010100" # 기간별 시세/일별 차트 조회
-        }
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": symbol,
-            "FID_INPUT_DATE_1": start_date.replace("-", ""),
-            "FID_INPUT_DATE_2": end_date.replace("-", ""),
-            "FID_PERIOD_DIV_CODE": "D", # 일봉
-            "FID_ORG_ADJ_PRC": "1"  # 수정주가 적용
-        }
-        
-        logger.info(f"Fetching KIS historical OHLCV for {symbol} ({start_date} ~ {end_date})...")
-        res = self.client.get(url, params=params, headers=headers)
-        
-        if res and res.get("rt_cd") == "0":
-            return res.get("output2") # output2가 일별 데이터 리스트
+    def _get_token(self) -> str:
+        """Access Token 발급 및 캐싱 (유효기간 24시간)"""
+        now = time.time()
+        if self._access_token and self._token_expires_at > now:
+            return self._access_token
             
-        logger.error(f"Failed to fetch KIS history for {symbol}: {res}")
-        return None
+        url = f"{self.base_url}/oauth2/tokenP"
+        headers = {"content-type": "application/json"}
+        data = {
+            "grant_type": "client_credentials",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret
+        }
+        
+        try:
+            res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10)
+            res.raise_for_status()
+            token_data = res.json()
+            self._access_token = token_data["access_token"]
+            # To be safe, set expires in 23 hours
+            self._token_expires_at = now + (23 * 3600)
+            logger.info("Successfully fetched KIS access token.")
+            return self._access_token
+        except Exception as e:
+            logger.error(f"Failed to fetch KIS token: {e}")
+            raise
+
+    def fetch_daily_investor_supply(self, symbol: str, target_date: date) -> Optional[Dict[str, Any]]:
+        """특정 일자의 투자자별 수급 데이터 단건 조회"""
+        try:
+            token = self._get_token()
+            url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
+            
+            headers = {
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "tr_id": "FHKST01010900",
+                "custtype": "P"
+            }
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol
+            }
+            
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code != 200:
+                logger.error(f"KIS API Error {res.status_code}: {res.text}")
+                return None
+                
+            data = res.json()
+            target_dt_str = target_date.strftime("%Y%m%d")
+            
+            if "output" in data:
+                for row in data["output"]:
+                    if row.get("stck_bsop_date") == target_dt_str:
+                        return {
+                            "symbol": symbol,
+                            "base_date": target_dt_str,
+                            "foreign_net_buy": int(row.get("frgn_ntby_qty", 0)),
+                            "institutional_net_buy": int(row.get("orgn_ntby_qty", 0)),
+                            "individual_net_buy": int(row.get("prsn_ntby_qty", 0)),
+                            "foreign_holding_ratio": 0.0, # Not directly provided in this specific API endpoint
+                            "short_volume": 0,
+                            "short_balance": 0,
+                            "lending_balance": 0
+                        }
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching daily supply for {symbol} via KIS: {e}")
+            return None
+
+    def fetch_supply_history(self, symbol: str, pages: int = 40) -> List[Dict[str, Any]]:
+        """여러 일자의 투자자별 수급 이력을 대량 조회 (단순 반복 조회 방식)
+        Note: 페이지네이션(연속조회) 구현 대신 기본 조회(최근 30일)까지만 처리하도록 단순화 
+        또는 API 스펙이 허용하는 선에서 최근 이력 반환
+        """
+        results = []
+        try:
+            token = self._get_token()
+            url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
+            
+            headers = {
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "tr_id": "FHKST01010900",
+                "custtype": "P"
+            }
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol
+            }
+            
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if "output" in data:
+                    for row in data["output"]:
+                        results.append({
+                            "symbol": symbol,
+                            "base_date": row.get("stck_bsop_date", ""),
+                            "foreign_net_buy": int(row.get("frgn_ntby_qty", 0)),
+                            "institutional_net_buy": int(row.get("orgn_ntby_qty", 0)),
+                            "individual_net_buy": int(row.get("prsn_ntby_qty", 0)),
+                            "foreign_holding_ratio": 0.0,
+                            "short_volume": 0,
+                            "short_balance": 0,
+                            "lending_balance": 0
+                        })
+            return results
+        except Exception as e:
+            logger.error(f"Error bulk fetching supply for {symbol} via KIS: {e}")
+            return results
