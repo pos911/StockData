@@ -141,6 +141,35 @@ class KISCollector:
             logger.error(f"Error fetching daily supply for {symbol} via KIS: {e}")
             return None
 
+    def fetch_stock_price(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """주식 현재가 시세 조회 (FHKST01010100)"""
+        try:
+            token = self._get_token()
+            url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+            
+            headers = {
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "tr_id": "FHKST01010100",
+                "custtype": "P"
+            }
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol
+            }
+            
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code != 200:
+                logger.error(f"KIS API Error {res.status_code}: {res.text}")
+                return None
+                
+            return res.json()
+        except Exception as e:
+            logger.error(f"Error fetching stock price for {symbol}: {e}")
+            return None
+
     def fetch_supply_history(self, symbol: str, pages: int = 40) -> List[Dict[str, Any]]:
         """여러 일자의 투자자별 수급 이력을 대량 조회 (단순 반복 조회 방식)
         Note: 페이지네이션(연속조회) 구현 대신 기본 조회(최근 30일)까지만 처리하도록 단순화 

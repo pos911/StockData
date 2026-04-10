@@ -29,15 +29,18 @@ class StockNormalizer:
     @staticmethod
     def normalize_kis_price(raw_data: Dict[str, Any], available_at: datetime) -> Dict[str, Any]:
         """KIS 주가 데이터를 normalized_stock_prices_daily 형식으로 변환"""
+        # API 응답 구조에 따라 'output' 필드 내부 확인
+        data = raw_data.get("output", raw_data)
+        
         return {
-            "symbol": raw_data.get("stck_shrn_iscd"),
-            "base_date": datetime.now().strftime("%Y-%m-%d"),
-            "open_price": float(raw_data.get("stck_oprc", 0)),
-            "high_price": float(raw_data.get("stck_hgpr", 0)),
-            "low_price": float(raw_data.get("stck_lwpr", 0)),
-            "close_price": float(raw_data.get("stck_prpr", 0)),
-            "volume": float(raw_data.get("acml_vol", 0)),
-            "trading_value": float(raw_data.get("acml_tr_pbmn", 0)),
+            "symbol": data.get("stck_shrn_iscd"),
+            "base_date": available_at.strftime("%Y-%m-%d"),
+            "open_price": float(data.get("stck_oprc", 0)),
+            "high_price": float(data.get("stck_hgpr", 0)),
+            "low_price": float(data.get("stck_lwpr", 0)),
+            "close_price": float(data.get("stck_prpr", 0)),
+            "volume": float(data.get("acml_vol", 0)),
+            "trading_value": float(data.get("acml_tr_pbmn", 0)),
             "available_at": available_at.isoformat()
         }
 
