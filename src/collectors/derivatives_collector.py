@@ -20,25 +20,25 @@ class DerivativesCollector:
         
         try:
             # 1. KOSPI 200 지수 (Spot) 조회
-            # '101' 은 KOSPI 200 지수 번호
             df_index = stock.get_index_ohlcv_by_date(target_dt_str, target_dt_str, "101")
             
             if df_index.empty:
                 logger.warning(f"No index data found for {target_dt_str}")
                 return None
             
-            index_close = float(df_index.iloc[0]["종가"])
+            kospi200_spot = float(df_index.iloc[0]["종가"])
             
-            # 2. 선물 지수 및 미결제약정 (FinanceDataReader 활용)
-            # 코스피200 선물 최근월물 등은 상서로운 방식이 필요하나, 지수 데이터로 대체하거나
-            # fdr에서 'KS200' 지수를 가져올 수 있음.
-            # 여기선 실제 지수값을 kospi200_futures 항목에 매핑 (구조 유지)
+            # 2. 선물 지수 및 미결제약정 방어 로직
+            # 파생상품 API 연동 전까지 선물을 현물과 동일하게 맵핑하고 베이시스를 0.0으로 고정
+            kospi200_futures = kospi200_spot
+            futures_basis = 0.0
+            open_interest = int(df_index.iloc[0].get("거래량", 0))
             
             return {
                 "base_date": target_date.strftime("%Y-%m-%d"),
-                "kospi200_futures": index_close, # 지수 종가로 대체
-                "futures_basis": 0.0, # 계산 로직 필요 시 추가
-                "open_interest": int(df_index.iloc[0].get("거래량", 0)), # 거래량으로 대체하거나 OI 별도 수집
+                "kospi200_futures": kospi200_futures,
+                "futures_basis": futures_basis,
+                "open_interest": open_interest,
                 "night_futures_return": 0.0,
                 "expiration_flag": self._is_expiration_date(target_date)
             }

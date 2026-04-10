@@ -46,11 +46,20 @@ class SignalGenerator:
             else:
                 supply_score = 0.0
         
-        # 3. Macro Score (기존 가중치 유지, 데이터가 있다면 연동)
-        macro_score = features.get("risk_on_off_score", 0.3) # fallback to neutral-ish
+        # 3. Macro Score (동적 반영)
+        usdkrw_momentum = features.get("usdkrw_momentum", 0)
+        risk_on_off = features.get("risk_on_off_score", 0)
         
-        # 4. Derivatives Score
-        derivatives_score = features.get("basis_signal", 0.2)
+        # 환율 모멘텀이 높으면 부정적(-0.5), 리스크온 상태면 긍정적(0.5)
+        if usdkrw_momentum > 0.02:
+            macro_score = -0.5
+        elif risk_on_off > 0:
+            macro_score = 0.5
+        else:
+            macro_score = 0.0
+        
+        # 4. Derivatives Score (basis_signal 연동)
+        derivatives_score = features.get("basis_signal", 0.0)
         
         # 5. Event Score
         event_score = features.get("event_score", 0.0)

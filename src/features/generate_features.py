@@ -49,7 +49,12 @@ class FeatureGenerator:
             return
 
         # 4. 데이터 병합 (Merge)
-        df = pd.merge(prices_df, supply_df, on=["symbol", "base_date"], how="inner")
+        # 주가 데이터가 기준이 되도록 how='left' 사용
+        df = pd.merge(prices_df, supply_df, on=["symbol", "base_date"], how="left")
+        
+        # 수급 데이터 누락 시 0으로 채움
+        df["foreign_net_buy"] = df["foreign_net_buy"].fillna(0)
+        
         if df.empty:
             logger.warning("Merged dataframe is empty. Ensure dates match between Price and Supply tables.")
             return
