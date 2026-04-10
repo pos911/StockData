@@ -1,6 +1,9 @@
 import os
+import json
 import argparse
-from datetime import date, timedelta
+import pandas as pd
+import numpy as np
+from datetime import date, timedelta, datetime
 from typing import List, Dict, Any
 
 from src.utils.logger import get_logger
@@ -12,72 +15,124 @@ logger = get_logger(__name__)
 
 class FeatureGenerator:
     """
-    Normalized 데이터를 바탕으로 Trading Algorithmic Feature들을 생성.
-    실제 프로덕션에서는 pandas/dask 기반으로 윈도우 함수 및 rolling 등을 적용해야 하지만
-    현 스크립트는 뼈대를 나타냅니다.
+    Normalized 데이터를 바탕으로 실제 Trading Algorithmic Feature들을 생성합니다.
+    pandas를 사용하여 이동평균, 변동성, 수급 Z-Score 등을 계산합니다.
     """
     def __init__(self, loader: SupabaseLoader):
         self.loader = loader
 
     def generate_features_for_date(self, target_date: date):
-        # 파라미터 준비
-        base_date_str = target_date.strftime("%Y-%m-%d")
-        available_at_str = generate_available_at_for_eod(target_date).isoformat()
+        # 1. 대상 종목 리스트 (Universe) 가져오기
+        universe = self._load_universe()
+        enabled_symbols = [s["symbol"] for s in universe if s.get("enabled", False)]
+        
+        if not enabled_symbols:
+            logger.warning("No enabled symbols found in universe.")
+            return
+
+        # 2. 데이터 조회 기간 설정 (최근 60일치 확보)
+        start_date = target_date - timedelta(days=90) # 주말/공휴일 고려하여 넉넉히 90일
+        start_date_str = start_date.strftime("%Y-%m-%d")
+        end_date_str = target_date.strftime("%Y-%m-%d")
+        
+        logger.info(f"Fetching data from {start_date_str} to {end_date_str} for {len(enabled_symbols)} symbols...")
+
+        # 3. 데이터 로드 (Price & Supply)
+        # Note: 대량 조회를 위해 in_. 연산자 활용 추천되나, 여기선 심플하게 전체 조회 후 필터링하거나 루프 처리
+        # 성능을 위해 전체를 한 번에 가져오는 방식으로 구현
+        
+        prices_df = self._fetch_table_data("normalized_stock_prices_daily", start_date_str, end_date_str)
+        supply_df = self._fetch_table_data("normalized_stock_supply_daily", start_date_str, end_date_str)
+
+        if prices_df.empty or supply_df.empty:
+            logger.error("Required data (Prices or Supply) is missing in Supabase.")
+            return
+
+        # 4. 데이터 병합 (Merge)
+        df = pd.merge(prices_df, supply_df, on=["symbol", "base_date"], how="inner")
+        if df.empty:
+            logger.warning("Merged dataframe is empty. Ensure dates match between Price and Supply tables.")
+            return
+
+        # 날짜 정렬 (계산을 위해 필수)
+        df = df.sort_values(["symbol", "base_date"]).reset_index(drop=True)
+
+        # 5. 피처 계산 (Feature Engineering)
+        logger.info("Calculating technical and supply features...")
         
         feature_records = []
+        available_at_str = generate_available_at_for_eod(target_date).isoformat()
         
-        # 1. Price-based & Supply-based
-        # (원래 DB에서 select해서 pandas에서 일괄 계산하지만, 목업으로 구성)
-        symbols_to_process = ["005930", "000660"]
-        for symbol in symbols_to_process:
-            # Price Mock
-            feature_records.extend([
-                self._record(symbol, base_date_str, "return_5d", 0.02, available_at_str),
-                self._record(symbol, base_date_str, "return_20d", -0.015, available_at_str),
-                self._record(symbol, base_date_str, "moving_avg_5", 52000, available_at_str),
-                self._record(symbol, base_date_str, "moving_avg_20", 51500, available_at_str),
-                self._record(symbol, base_date_str, "moving_avg_60", 50000, available_at_str),
-                self._record(symbol, base_date_str, "volatility_20d", 0.01, available_at_str),
-                self._record(symbol, base_date_str, "volume_spike_ratio", 1.5, available_at_str),
-            ])
-            # Supply Mock
-            feature_records.extend([
-                self._record(symbol, base_date_str, "foreign_flow_zscore", 1.2, available_at_str),
-                self._record(symbol, base_date_str, "institutional_flow_zscore", -0.5, available_at_str),
-                self._record(symbol, base_date_str, "accumulation_score", 0.8, available_at_str),
-            ])
-            # Event Mock
-            feature_records.extend([
-                self._record(symbol, base_date_str, "event_score", 0.5, available_at_str),
-                self._record(symbol, base_date_str, "sentiment_score", 0.3, available_at_str),
-            ])
+        for symbol, group in df.groupby("symbol"):
+            group = group.sort_values("base_date")
+            
+            # 가격 지표
+            close = group["close_price"]
+            group["return_5d"] = close.pct_change(5)
+            group["moving_avg_5"] = close.rolling(5).mean()
+            group["moving_avg_20"] = close.rolling(20).mean()
+            # 20일 변동성 (수익률의 표준편차)
+            group["volatility_20d"] = close.pct_change().rolling(20).std()
+            
+            # 수급 지표 (외국인 순매수 Z-Score)
+            foreign_buy = group["foreign_net_buy"]
+            f_mean = foreign_buy.rolling(20).mean()
+            f_std = foreign_buy.rolling(20).std()
+            group["foreign_flow_zscore"] = (foreign_buy - f_mean) / f_std.replace(0, np.nan)
+            
+            # 마지막 날짜(target_date) 행 추출
+            last_row = group[group["base_date"] == end_date_str]
+            if last_row.empty:
+                continue
+                
+            row = last_row.iloc[0]
+            
+            # 결과물 리스트업
+            targets = {
+                "return_5d": row.get("return_5d"),
+                "moving_avg_5": row.get("moving_avg_5"),
+                "moving_avg_20": row.get("moving_avg_20"),
+                "volatility_20d": row.get("volatility_20d"),
+                "foreign_flow_zscore": row.get("foreign_flow_zscore")
+            }
+            
+            for f_name, f_val in targets.items():
+                if pd.notnull(f_val):
+                    feature_records.append({
+                        "symbol": symbol,
+                        "base_date": end_date_str,
+                        "feature_name": f_name,
+                        "feature_value": float(f_val),
+                        "available_at": available_at_str
+                    })
 
-        # 2. Macro-based & Derivatives Mock (applied to general "MARKET")
-        feature_records.extend([
-            self._record("MARKET", base_date_str, "usdkrw_momentum", -0.01, available_at_str),
-            self._record("MARKET", base_date_str, "us10y_change", 0.05, available_at_str),
-            self._record("MARKET", base_date_str, "risk_on_off_score", 0.6, available_at_str),
-            self._record("MARKET", base_date_str, "basis_signal", 1, available_at_str), # 1: contango, -1: backwardation
-            self._record("MARKET", base_date_str, "oi_change_signal", 1.1, available_at_str),
-            self._record("MARKET", base_date_str, "expiration_effect_flag", 0, available_at_str),
-        ])
-
-        # Feature Store 저장
+        # 6. Feature Store 저장
         if feature_records:
             self.loader.upsert_records("feature_store_daily", feature_records)
-            logger.info(f"Upserted {len(feature_records)} features into feature_store_daily.")
+            logger.info(f"Successfully upserted {len(feature_records)} real features for {target_date}.")
+        else:
+            logger.warning("No features were generated (might be due to insufficient history).")
 
-    def _record(self, symbol, date_str, f_name, f_value, available_at):
-        return {
-            "symbol": symbol,
-            "base_date": date_str,
-            "feature_name": f_name,
-            "feature_value": f_value,
-            "available_at": available_at
-        }
+    def _fetch_table_data(self, table_name: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Supabase에서 특정 기간의 데이터를 DataFrame으로 로드"""
+        try:
+            # 쿼리: base_date >= start AND base_date <= end
+            res = self.loader.client.table(table_name).select("*")\
+                .gte("base_date", start_date)\
+                .lte("base_date", end_date)\
+                .execute()
+            
+            return pd.DataFrame(res.data)
+        except Exception as e:
+            logger.error(f"Error fetching {table_name}: {e}")
+            return pd.DataFrame()
+
+    def _load_universe(self):
+        with open("config/stock_universe.json", "r", encoding="utf-8") as f:
+            return json.load(f)
 
 def run_job(target_date: date):
-    logger.info(f"Starting Feature Engineering Job for {target_date}...")
+    logger.info(f"Starting Real Feature Engineering Job for {target_date}...")
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     

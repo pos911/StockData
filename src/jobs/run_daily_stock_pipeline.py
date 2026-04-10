@@ -148,12 +148,12 @@ def run_pipeline(target_date: date):
         norm_data = StockNormalizer.normalize_krx_daily(raw_data, available_at)
         loader.upsert_records("normalized_stock_prices_daily", [norm_data])
         
-        # 수급 데이터 (Supply) 처리
-        supply_data = krx_collector.fetch_daily_investor_supply(symbol, target_date)
+        # 수급 데이터 (Supply) 처리 (KIS API 활용)
+        supply_data = kis_collector.fetch_daily_investor_supply(symbol, target_date)
         if supply_data:
             # Raw Supply
             raw_supply_record = {
-                "source": "KRX_Supply",
+                "source": "KIS_Supply",
                 "symbol": symbol,
                 "base_date": target_date.strftime("%Y-%m-%d"),
                 "raw_data": json.dumps(supply_data),
