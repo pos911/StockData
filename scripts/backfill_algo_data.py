@@ -23,7 +23,7 @@ def backfill_algo_data(days: int = 365):
     universe = load_universe()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     
-    kis_collector = KISCollector(config=config.get("kis", {}))
+    kis_collector = KISCollector(config=config)
     global_collector = GlobalIndexCollector()
     
     end_date = datetime.now().date()

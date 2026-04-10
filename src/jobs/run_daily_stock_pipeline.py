@@ -33,12 +33,7 @@ def run_pipeline(target_date: date):
     
     krx_collector = KRXCollector(auth_key=krx_auth_key)
     
-    kis_config = config.get("kis", {})
-    kis_collector = KISCollector(
-        api_key=kis_config.get("app_key", ""),
-        api_secret=kis_config.get("app_secret", ""),
-        account_no=kis_config.get("account_no", "")
-    )
+    kis_collector = KISCollector(config=config)
     
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
     naver_collector = NaverNewsCollector(

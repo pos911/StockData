@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Dict, Any, Optional, List
 import requests
 import json
@@ -11,20 +11,54 @@ logger = get_logger(__name__)
 
 class KISCollector:
     """한국투자증권(KIS) Open API 기반 수집기"""
-    def __init__(self, config: Dict[str, str]):
-        self.app_key = config.get("app_key", "")
-        self.app_secret = config.get("app_secret", "")
+    def __init__(self, config: Dict[str, Any]):
+        self.app_key = config.get("kis", {}).get("app_key", "")
+        self.app_secret = config.get("kis", {}).get("app_secret", "")
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.client = HttpClient()
         self._access_token = None
         self._token_expires_at = 0
+        
+        supa_url = config.get("supabase", {}).get("url", "")
+        supa_key = config.get("supabase", {}).get("service_role_key", "")
+        if supa_url and supa_key:
+            try:
+                from supabase import create_client, Client
+                self.db_client = create_client(supa_url, supa_key)
+            except ImportError:
+                self.db_client = None
+        else:
+            self.db_client = None
 
     def _get_token(self) -> str:
-        """Access Token 발급 및 캐싱 (유효기간 24시간)"""
+        """Access Token 발급 및 캐싱 (DB -> 메모리 -> KIS 신규 발급)"""
         now = time.time()
+        
+        # 1. Check Memory Cache
         if self._access_token and self._token_expires_at > now:
             return self._access_token
             
+        # 2. Check Supabase DB Cache
+        if self.db_client:
+            try:
+                res = self.db_client.table("api_tokens").select("*").eq("service_name", "kis").execute()
+                if res.data:
+                    row = res.data[0]
+                    # expires_at: 2026-04-10T14:10:21.000Z
+                    expires_str = row.get("expires_at")
+                    if expires_str:
+                        # parse ISO format and check validity (rough translation to timestamp)
+                        import dateutil.parser
+                        dt_expires = dateutil.parser.isoparse(expires_str)
+                        if dt_expires > datetime.now(timezone.utc):
+                            self._access_token = row["token_value"]
+                            self._token_expires_at = dt_expires.timestamp()
+                            logger.info("Loaded KIS token from Supabase DB cache.")
+                            return self._access_token
+            except Exception as e:
+                logger.warning(f"Failed to read token from DB: {e}")
+
+        # 3. Request New Token from KIS API
         url = f"{self.base_url}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
         data = {
@@ -40,6 +74,20 @@ class KISCollector:
             self._access_token = token_data["access_token"]
             # To be safe, set expires in 23 hours
             self._token_expires_at = now + (23 * 3600)
+            
+            # Save to DB
+            if self.db_client:
+                try:
+                    expires_iso = datetime.fromtimestamp(self._token_expires_at, tz=timezone.utc).isoformat()
+                    self.db_client.table("api_tokens").upsert({
+                        "service_name": "kis",
+                        "token_value": self._access_token,
+                        "expires_at": expires_iso
+                    }).execute()
+                    logger.info("Saved fresh KIS token to Supabase DB.")
+                except Exception as db_e:
+                    logger.warning(f"Failed to save token to DB: {db_e}")
+                    
             logger.info("Successfully fetched KIS access token.")
             return self._access_token
         except Exception as e:
