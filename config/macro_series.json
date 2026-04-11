@@ -19,5 +19,47 @@
     "name": "South Korea Interest Rate",
     "frequency": "Monthly",
     "enabled": false
+  },
+  {
+    "source": "YAHOO",
+    "series_id": "^VIX",
+    "name": "VIX Index",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "YAHOO",
+    "series_id": "GC=F",
+    "name": "Gold Futures",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "YAHOO",
+    "series_id": "HG=F",
+    "name": "Copper Futures",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "YAHOO",
+    "series_id": "CL=F",
+    "name": "WTI Crude Oil Futures",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "YAHOO",
+    "series_id": "BDRY",
+    "name": "Breakwave Dry Bulk Shipping ETF (BDI Alternative)",
+    "frequency": "Daily",
+    "enabled": true
+  },
+  {
+    "source": "FRED",
+    "series_id": "BAMLH0A0HYM2",
+    "name": "ICE BofA US High Yield Index Option-Adjusted Spread",
+    "frequency": "Daily",
+    "enabled": true
   }
 ]

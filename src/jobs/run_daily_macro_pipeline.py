@@ -80,10 +80,27 @@ def run_pipeline(target_date: date):
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
 
+    # KRX Market Breadth 수집 (코스피)
+    from src.collectors.krx_collector import KRXCollector
+    krx = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
+    breadth_data = krx.fetch_market_breadth(target_date)
+    
     # 파생 매크로 (Global Index) 수집 및 적재 
     from src.collectors.global_index_collector import GlobalIndexCollector
     global_index = GlobalIndexCollector()
     global_data = global_index.fetch_daily_indices(target_date)
+    
+    # FRED: High Yield Spread (BAMLH0A0HYM2) - 별도 추출 (Global Macro Daily용)
+    hy_spread = None
+    raw_hy = fred.fetch_series(series_id="BAMLH0A0HYM2", observation_start=target_date.strftime("%Y-%m-%d"), limit=1)
+    if raw_hy and raw_hy.get("observations"):
+        try:
+            val = raw_hy["observations"][0]["value"]
+            if val != ".": # FRED missing data marker
+                hy_spread = float(val)
+        except (ValueError, TypeError):
+            pass
+
     if global_data:
         global_record = {
             "base_date": global_data.get("base_date"),
@@ -97,8 +114,18 @@ def run_pipeline(target_date: date):
             "sp500": global_data.get("sp500"),
             "sox": global_data.get("sox"),
             "vix": global_data.get("vix"),
+            # 신규 추가 지표
+            "gold": global_data.get("gold"),
+            "copper": global_data.get("copper"),
+            "bdry": global_data.get("bdry"),
+            "hy_spread": hy_spread,
             "available_at": available_at.isoformat()
         }
+        
+        # Market Breadth 데이터 병합
+        if breadth_data:
+            global_record.update(breadth_data)
+            
         loader.upsert_records("normalized_global_macro_daily", [global_record])
         total_processed += 1
 

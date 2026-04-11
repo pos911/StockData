@@ -17,7 +17,10 @@ class GlobalIndexCollector:
             "sox": "^SOX", # PHLX Semiconductor
             "vix": "^VIX",
             "wti": "CL=F",
-            "brent": "BZ=F"
+            "brent": "BZ=F",
+            "gold": "GC=F",
+            "copper": "HG=F",
+            "bdry": "BDRY"
         }
 
     def fetch_daily_indices(self, target_date: date) -> Optional[Dict[str, Any]]:
