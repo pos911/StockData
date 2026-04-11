@@ -122,9 +122,15 @@ def run_pipeline(target_date: date):
             "available_at": available_at.isoformat()
         }
         
-        # Market Breadth 데이터 병합
+        # Market Breadth는 별도 테이블에 저장 (글로벌 매크로와 분리)
         if breadth_data:
-            global_record.update(breadth_data)
+            breadth_record = {
+                "base_date": target_date.strftime("%Y-%m-%d"),
+                **breadth_data,
+                "available_at": available_at.isoformat()
+            }
+            loader.upsert_records("market_breadth_daily", [breadth_record])
+            total_processed += 1
             
         loader.upsert_records("normalized_global_macro_daily", [global_record])
         total_processed += 1

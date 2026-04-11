@@ -110,6 +110,30 @@ class FeatureGenerator:
                         "feature_value": float(f_val),
                         "available_at": available_at_str
                     })
+        # 7. 글로벌 매크로 피처 계산 (Copper/Gold, Gold/Oil Ratio)
+        logger.info("Calculating global macro ratios...")
+        macro_df = self._fetch_table_data("normalized_global_macro_daily", start_date_str, end_date_str)
+        if not macro_df.empty:
+            macro_df = macro_df.sort_values("base_date")
+            # 금, 구리, 유성(wti) 컬럼 활용
+            if "gold" in macro_df.columns and "copper" in macro_df.columns:
+                macro_df["copper_gold_ratio"] = macro_df["copper"] / macro_df["gold"]
+            if "gold" in macro_df.columns and "wti" in macro_df.columns:
+                macro_df["gold_oil_ratio"] = macro_df["gold"] / macro_df["wti"]
+            
+            last_macro = macro_df[macro_df["base_date"] == end_date_str]
+            if not last_macro.empty:
+                m_row = last_macro.iloc[0]
+                for f_name in ["copper_gold_ratio", "gold_oil_ratio"]:
+                    f_val = m_row.get(f_name)
+                    if pd.notnull(f_val):
+                        feature_records.append({
+                            "symbol": "GLOBAL",
+                            "base_date": end_date_str,
+                            "feature_name": f_name,
+                            "feature_value": float(f_val),
+                            "available_at": available_at_str
+                        })
 
         # 6. Feature Store 저장
         if feature_records:

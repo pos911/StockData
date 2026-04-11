@@ -46,39 +46,40 @@ class KRXCollector:
     def fetch_market_breadth(self, target_date: date) -> Optional[Dict[str, Any]]:
         """
         KRX OPEN API '전종목 시세' 엔드포인트를 호출하여 Market Breadth 수치를 산출합니다.
-        (advances, declines, advancing_volume, declining_volume, unchanged)
+        승인 대기 중(404, 403 등)일 경우 에러 대신 경고 로그만 남기고 None을 리턴합니다.
         """
         if not self.auth_key:
-            logger.error("KRX auth_key is missing. Cannot fetch market breadth.")
+            logger.warning("KRX auth_key is missing. Skipping market breadth.")
             return None
 
         try:
             # KRX OPEN API '주식 시세 -> 전종목 시세'
-            url = "https://openapi.krx.co.kr/svc/apis/sto/stk_bydd_clpr"
+            # 엔드포인트: https://data.krx.co.kr/svc/apis/sto/stk_bydd_clpr
+            url = "https://data.krx.co.kr/svc/apis/sto/stk_bydd_clpr"
             params = {
                 "basDd": target_date.strftime("%Y%m%d")
             }
             headers = {"AUTH_KEY": self.auth_key}
             
-            logger.info(f"Calling KRX API for market breadth: {params['basDd']}")
-            response = requests.get(url, params=params, headers=headers)
-            response.raise_for_status()
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            
+            # 승인 전(404) 혹은 권한 부족(403) 시 중단 방지
+            if response.status_code != 200:
+                logger.warning(f"KRX API pending approval (Status: {response.status_code}). Skipping.")
+                return None
             
             data = response.json()
-            # KRX OPEN API의 경우 통상 결과 데이터가 'OutBlock_1' 키에 담김
             items = data.get("OutBlock_1", [])
             if not items:
-                logger.warning(f"No market breadth data returned from KRX API for {target_date}")
                 return None
             
             df = pd.DataFrame(items)
             
-            # KOSPI 종목 필터링 (MKT_ID: 'STK'가 유가증권시장)
+            # KOSPI 종목 필터링
             if "MKT_ID" in df.columns:
                 df = df[df["MKT_ID"] == "STK"]
             
             if df.empty:
-                logger.warning("Market breadth data is empty after filtering for KOSPI.")
                 return None
             
             # 필요 컬럼 숫자형 변환 (FLUC_RT: 등락률, TDD_VLM: 거래량)
@@ -89,16 +90,15 @@ class KRXCollector:
             declines_df = df[df["FLUC_RT"] < 0]
             unchanged_df = df[df["FLUC_RT"] == 0]
             
-            result = {
+            return {
+                "base_date": target_date.strftime("%Y%m%d"),
                 "advances": int(len(advances_df)),
                 "declines": int(len(declines_df)),
                 "unchanged": int(len(unchanged_df)),
                 "advancing_volume": int(advances_df["TDD_VLM"].sum()),
                 "declining_volume": int(declines_df["TDD_VLM"].sum())
             }
-            logger.info(f"Market breadth calculated for {target_date}: {result}")
-            return result
             
         except Exception as e:
-            logger.error(f"Failed to fetch market breadth from KRX OPEN API: {e}")
+            logger.warning(f"KRX API pending approval or error: {e}. Skipping.")
             return None
