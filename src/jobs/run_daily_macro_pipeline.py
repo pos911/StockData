@@ -26,6 +26,11 @@ def run_pipeline(target_date: date):
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     fred = FREDCollector(api_key=config.get("fred", {}).get("api_key", ""))
     
+    from src.collectors.tradingeconomics_collector import TradingEconomicsCollector
+    te_collector = TradingEconomicsCollector(client_key=config.get("tradingeconomics", {}).get("api_key", ""))
+    
+    import yfinance as yf
+    
     # 0. 마스터 정보 동기화
     logger.info("Syncing macro master metadata...")
     master_records = []
@@ -53,8 +58,6 @@ def run_pipeline(target_date: date):
         
         if source == "FRED":
             series_id = series.get("series_id")
-            
-            # [최적화] 최근 7일치 데이터만 증분 수집 (과거 전체가 아닌 새로운 값 위주)
             from datetime import timedelta
             obs_start = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
             
@@ -63,12 +66,11 @@ def run_pipeline(target_date: date):
             obs = raw_data.get("observations", []) if raw_data else []
             
             if obs:
-                # Raw 적재 (최근 값 1건만 한다고 가정 시 로직 조정 필요. 본 예제는 단순화)
-                # 실제론 obs 전체 혹은 일부를 raw 테이블에 넣음.
+                # Raw 적재
                 raw_record = {
                     "source": "FRED",
                     "series_id": series_id,
-                    "base_date": target_date.strftime("%Y-%m-%d"), # 가장 최신 기준
+                    "base_date": target_date.strftime("%Y-%m-%d"),
                     "raw_data": json.dumps(raw_data),
                     "collected_at": timestamp_now.isoformat(),
                     "available_at": available_at.isoformat()
@@ -79,6 +81,55 @@ def run_pipeline(target_date: date):
                 norm_records = MacroNormalizer.normalize_fred(series_id, obs, available_at)
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
+
+        elif source == "TradingEconomics":
+            endpoint_key = series.get("endpoint_key", "")
+            if "_" in endpoint_key:
+                # e.g., south_korea_interest_rate -> country: south korea, indicator: interest rate
+                parts = endpoint_key.split("_")
+                indicator = parts[-1]
+                country = " ".join(parts[:-1])
+                
+                logger.info(f"Fetching TradingEconomics: {country} / {indicator}")
+                raw_data = te_collector.fetch_indicator(country, indicator)
+                
+                if raw_data:
+                    # TradingEconomics response is often a list of historical values
+                    # We take the most recent ones
+                    norm_records = []
+                    for item in raw_data[-5:]: # 최근 5건 정도
+                        dt = item.get("DateTime") # e.g. "2024-03-01T00:00:00"
+                        val = item.get("Value")
+                        if dt and val is not None:
+                            norm_records.append({
+                                "series_id": endpoint_key,
+                                "base_date": dt[:10],
+                                "value": float(val),
+                                "source": "TradingEconomics",
+                                "available_at": available_at.isoformat()
+                            })
+                    if norm_records:
+                        loader.upsert_records("normalized_macro_series", norm_records)
+                        total_processed += len(norm_records)
+
+        elif source == "YAHOO":
+            series_id = series.get("series_id")
+            logger.info(f"Fetching YAHOO series: {series_id}")
+            try:
+                from datetime import timedelta
+                df = yf.download(series_id, start=target_date - timedelta(days=5), end=target_date + timedelta(days=1), progress=False)
+                if not df.empty:
+                    norm_record = {
+                        "series_id": series_id,
+                        "base_date": df.index[-1].strftime("%Y-%m-%d"),
+                        "value": float(df["Close"].iloc[-1]),
+                        "source": "YAHOO",
+                        "available_at": available_at.isoformat()
+                    }
+                    loader.upsert_records("normalized_macro_series", [norm_record])
+                    total_processed += 1
+            except Exception as e:
+                logger.error(f"Failed to fetch YAHOO series {series_id}: {e}")
 
     # KRX Market Breadth 수집 (코스피)
     from src.collectors.krx_collector import KRXCollector

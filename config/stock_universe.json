@@ -1,23 +1,5 @@
 [
   {
-    "symbol": "005930",
-    "name": "삼성전자",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "000660",
-    "name": "SK하이닉스",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "005935",
-    "name": "삼성전자우",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
     "symbol": "017670",
     "name": "SK텔레콤",
     "market": "KOSPI",
@@ -30,255 +12,33 @@
     "enabled": true
   },
   {
-    "symbol": "004020",
-    "name": "현대제철",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "005380",
-    "name": "현대차",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "373220",
-    "name": "LG에너지솔루션",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "012450",
-    "name": "한화에어로스페이스",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "402340",
-    "name": "SK스퀘어",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "207940",
-    "name": "삼성바이오로직스",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "034020",
-    "name": "두산에너빌리티",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "000270",
-    "name": "기아",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "105560",
-    "name": "KB금융",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "329180",
-    "name": "HD현대중공업",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "028260",
-    "name": "삼성물산",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "032830",
-    "name": "삼성생명",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "068270",
-    "name": "셀트리온",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "252670",
-    "name": "KODEX 200선물인버스2X",
-    "market": "ETF",
-    "enabled": true
-  },
-  {
-    "symbol": "114800",
-    "name": "KODEX 인버스",
-    "market": "ETF",
-    "enabled": true
-  },
-  {
-    "symbol": "530036",
-    "name": "삼성 인버스 2X WTI원유 선물 ETN",
-    "market": "ETN",
-    "enabled": true
-  },
-  {
-    "symbol": "047040",
-    "name": "대우건설",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "251340",
-    "name": "KODEX 코스닥150선물인버스",
-    "market": "ETF",
-    "enabled": true
-  },
-  {
-    "symbol": "305720",
-    "name": "KODEX 2차전지산업레버리지",
-    "market": "ETF",
-    "enabled": true
-  },
-  {
-    "symbol": "010170",
-    "name": "대한광통신",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "008350",
-    "name": "남선알미늄",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "252710",
-    "name": "TIGER 200선물인버스2X",
-    "market": "ETF",
-    "enabled": true
-  },
-  {
-    "symbol": "233740",
-    "name": "KODEX 코스닥150레버리지",
-    "market": "ETF",
-    "enabled": true
-  },
-  {
-    "symbol": "003280",
-    "name": "흥아해운",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "152550",
-    "name": "한국ANKOR유전",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "032820",
-    "name": "우리기술",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "062970",
-    "name": "한국첨단소재",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "006360",
-    "name": "GS건설",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "028050",
-    "name": "삼성E&A",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "046890",
-    "name": "서울반도체",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "319400",
-    "name": "현대무벡스",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "375500",
-    "name": "DL이앤씨",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "093370",
-    "name": "후성",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "100090",
-    "name": "SK오션플랜트",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "010140",
-    "name": "삼성중공업",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "475150",
-    "name": "SK이터닉스",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "079900",
-    "name": "전진건설로봇",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
     "symbol": "000720",
     "name": "현대건설",
     "market": "KOSPI",
     "enabled": true
   },
   {
-    "symbol": "006800",
-    "name": "미래에셋증권",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "000250",
-    "name": "삼천당제약",
+    "symbol": "063080",
+    "name": "컴투스홀딩스",
     "market": "KOSDAQ",
     "enabled": true
   },
   {
-    "symbol": "006400",
-    "name": "삼성SDI",
+    "symbol": "047810",
+    "name": "한국항공우주",
     "market": "KOSPI",
     "enabled": true
   },
   {
-    "symbol": "086520",
-    "name": "에코프로",
-    "market": "KOSDAQ",
+    "symbol": "005930",
+    "name": "삼성전자",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "000660",
+    "name": "SK하이닉스",
+    "market": "KOSPI",
     "enabled": true
   }
 ]

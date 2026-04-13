@@ -36,9 +36,14 @@ class KISBaseCollector:
         self.auth = auth_manager
         self.semaphore = semaphore
         self.tps_limiter = tps_limiter or RateLimiter(1.8) # 안전하게 1.8 TPS 설정
-        self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = config.get("kis", {}).get("app_key", "")
         self.app_secret = config.get("kis", {}).get("app_secret", "")
+        
+        # 기본 도메인 설정 (실전: REAL, 모의: VIRTUAL)
+        is_real = config.get("kis", {}).get("is_real", True)
+        domain = "openapi.koreainvestment.com" if is_real else "openvts.koreainvestment.com"
+        port = 9443 if is_real else 7070
+        self.base_url = f"https://{domain}:{port}"
         
         from src.loaders.supabase_loader import SupabaseLoader
         self.db_loader = SupabaseLoader(
@@ -86,14 +91,22 @@ class KISBaseCollector:
         """
         Rate limit 및 TPS 소모를 관리하며 안정적으로 API를 호출합니다.
         """
-        url = f"{self.base_url}{path}"
+        url = f"{self.base_url.strip()}{path.strip()}"
         headers = await self._get_headers(tr_id)
         session = await self.get_session()
         
         async with self.semaphore:
             await self.tps_limiter.wait() # 정밀 TPS 제어
             
-            async with session.request(method, url, headers=headers, params=params, json=json_data) as resp:
+            # 명시적 메서드 처리
+            if method.upper() == "GET":
+                request_func = session.get
+                request_args = {"params": params}
+            else:
+                request_func = session.post
+                request_args = {"json": json_data}
+            
+            async with request_func(url, headers=headers, **request_args) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     # KIS 비즈니스 로직 에러 처리 (API 성공 status지만 내부 응답이 에러인 경우)
@@ -109,9 +122,12 @@ class KISBaseCollector:
                 elif resp.status >= 500:
                     logger.error(f"KIS Server Error [{resp.status}] for {tr_id}")
                     raise aiohttp.ClientError(f"Server error: {resp.status}")
+                elif resp.status == 404:
+                    logger.warning(f"KIS API Resource Not Found (404) for {tr_id} at {url}. Skipping this endpoint.")
+                    return None
                 else:
                     text = await resp.text()
-                    logger.error(f"KIS API Critical Error [{resp.status}] for {tr_id}: {text}")
+                    logger.error(f"KIS API Error [{resp.status}] for {tr_id} at {url}: {text}")
                     return None
 
     async def upsert_records(self, table_name: str, records: List[Dict[str, Any]]):

@@ -11,6 +11,7 @@ from src.collectors.krx_collector import KRXCollector
 from src.collectors.kis.auth import KISAuthManager
 from src.collectors.kis.domestic import KISDomesticStockCollector
 from src.collectors.kis.base import KISBaseCollector
+from src.collectors.kis.fundamentals import KISFundamentalsCollector
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 from src.collectors.opendart_collector import OpenDartCollector
 from src.collectors.naver_news_collector import NaverNewsCollector
@@ -20,25 +21,29 @@ from src.utils.config_loader import load_config
 
 logger = get_logger(__name__)
 
-async def run_pipeline(target_date: date):
-    logger.info(f"🚀 Starting Modernized Daily Stock Pipeline for {target_date}...")
+async def run_pipeline(target_date: date, limit: int = None):
+    logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
     
     config = load_config()
     
-    # 1. 초기화 (New Async Collectors)
+    # 1. Initialize Async Collectors
     auth_mgr = KISAuthManager(config)
-    await auth_mgr.initialize() # 토큰 발급 및 갱신 시작
+    await auth_mgr.initialize()
     
-    semaphore = asyncio.Semaphore(2) # KIS TPS 제한
+    semaphore = asyncio.Semaphore(2) # KIS TPS limit
     kis_collector = KISDomesticStockCollector(config, auth_mgr, semaphore)
+    fundamentals_collector = KISFundamentalsCollector(config, auth_mgr, semaphore)
     
-    # 2. 스마트 유니버스 로딩 (Dynamic)
+    # 2. Smart Universe Loading (Dynamic)
     universe_loader = DynamicUniverseLoader(config, kis_collector)
     universe = await universe_loader.get_combined_universe()
     
-    # 기존 동기 컬렉터들
+    if limit:
+        logger.info(f"Limiting execution to first {limit} symbols for verification.")
+        universe = universe[:limit]
+    
+    # Legacy Sync Collectors
     krx_auth_key = config.get("krx", {}).get("auth_key", "")
-    skip_krx = not krx_auth_key or "YOUR_KRX_AUTH_KEY" in krx_auth_key
     krx_collector = KRXCollector(auth_key=krx_auth_key)
     
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
@@ -54,28 +59,31 @@ async def run_pipeline(target_date: date):
     timestamp_now = get_current_kst()
     total_processed = 0
     
-    # 3. 유니버스 기반 순회 수집
+    # 3. Collection Loop
     for stock in universe:
         symbol = stock["symbol"]
         name = stock["name"]
-        source_cat = stock.get("source_category", "unknown")
         
         try:
-            logger.info(f"Processing {name} ({symbol}) [Sources: {source_cat}]")
+            logger.info(f"Processing {name} ({symbol})")
             
-            # 4. stocks_master 업데이트
+            # 4. stocks_master update
             master_data = StockNormalizer.normalize_stock_master(symbol, name, "DYNAMIC")
             loader.upsert_records("stocks_master", [master_data])
 
-            # 5. KIS 데이터 수집 (Async)
-            kis_ohlcv = await kis_collector.fetch_ohlcv(symbol, timeframe='D', 
-                                                       start_date=target_date.strftime("%Y%m%d"), 
-                                                       end_date=target_date.strftime("%Y%m%d"))
+            # 5. KIS Data (Price, Supply, Short, Fundamentals)
+            await kis_collector.fetch_ohlcv(symbol, timeframe='D', 
+                                         start_date=target_date.strftime("%Y%m%d"), 
+                                         end_date=target_date.strftime("%Y%m%d"),
+                                         available_at=available_at.isoformat())
             
-            # 6. 수급 데이터 수집 (Async)
-            supply_records = await kis_collector.fetch_investor_trend(symbol)
+            await kis_collector.fetch_investor_trend(symbol, available_at=available_at.isoformat())
+            await kis_collector.fetch_short_selling(symbol, available_at=available_at.isoformat())
+            await fundamentals_collector.fetch_valuation_ratios(symbol, available_at=available_at.isoformat())
+            await fundamentals_collector.fetch_financial_statements(symbol, available_at=available_at.isoformat())
+            await fundamentals_collector.fetch_profitability_ratios(symbol, available_at=available_at.isoformat())
             
-            # 7. OpenDart 공시 수집 및 이벤트 추출
+            # 6. OpenDart Disclosures
             corp_code = corp_code_map.get(symbol)
             if corp_code:
                 disclosures = opendart_collector.fetch_daily_disclosures(corp_code, target_date.strftime("%Y-%m-%d"))
@@ -92,7 +100,7 @@ async def run_pipeline(target_date: date):
                         })
                     loader.upsert_records("raw_disclosures", disclosure_records)
                     
-                    # 이벤트 추출 및 적재
+                    # Event extraction
                     events = opendart_collector.parse_events(symbol, target_date.strftime("%Y-%m-%d"), disclosures)
                     if events:
                         event_records = []
@@ -108,7 +116,7 @@ async def run_pipeline(target_date: date):
                         if event_records:
                             loader.upsert_records("normalized_stock_events_daily", event_records)
 
-            # 8. Naver 뉴스 수집
+            # 7. Naver News
             news_data = naver_collector.fetch_news(f"{name} {symbol}")
             if news_data and news_data.get("items"):
                 news_records = []
@@ -123,27 +131,21 @@ async def run_pipeline(target_date: date):
                     })
                 loader.upsert_records("raw_disclosures", news_records)
 
-            # 9. KRX 데이터 수집 (Sync)
-            if not skip_krx:
-                raw_data = krx_collector.fetch_daily_ohlcv(symbol, target_date)
-                if raw_data:
-                    norm_data = StockNormalizer.normalize_krx_daily(raw_data, available_at)
-                    loader.upsert_records("normalized_stock_prices_daily", [norm_data])
-
             total_processed += 1
             
         except Exception as e:
             logger.error(f"Failed to process {symbol} ({name}): {e}", exc_info=True)
             continue
 
-    # 9. 정리
+    # 8. Cleanup
     await KISBaseCollector.close_session()
     loader.insert_log("daily_stock_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
-    logger.info("🏁 Pipeline Finished Successfully (Modernized).")
+    logger.info("Pipeline Finished Successfully (Corrected Encoding).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, help="YYYYMMDD format (default: today)")
+    parser.add_argument("--limit", type=int, help="Limit number of symbols to process")
     args = parser.parse_args()
     
     target_dt = get_current_kst().date()
@@ -151,4 +153,4 @@ if __name__ == "__main__":
          from src.utils.time_utils import parse_date_string
          target_dt = parse_date_string(args.date)
          
-    asyncio.run(run_pipeline(target_dt))
+    asyncio.run(run_pipeline(target_dt, limit=args.limit))
