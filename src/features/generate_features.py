@@ -24,7 +24,7 @@ class FeatureGenerator:
     def generate_features_for_date(self, target_date: date):
         # 1. 대상 종목 리스트 (Universe) 가져오기
         universe = self._load_universe()
-        enabled_symbols = [s["symbol"] for s in universe if s.get("enabled", False)]
+        enabled_symbols = [s["symbol"] for s in universe]
         
         if not enabled_symbols:
             logger.warning("No enabled symbols found in universe.")
@@ -44,20 +44,30 @@ class FeatureGenerator:
         prices_df = self._fetch_table_data("normalized_stock_prices_daily", start_date_str, end_date_str)
         supply_df = self._fetch_table_data("normalized_stock_supply_daily", start_date_str, end_date_str)
 
-        if prices_df.empty or supply_df.empty:
-            logger.error("Required data (Prices or Supply) is missing in Supabase.")
+        if prices_df.empty:
+            logger.error("Required Price data is missing in Supabase.")
             return
 
-        # 4. 데이터 병합 (Merge)
-        # 주가 데이터가 기준이 되도록 how='left' 사용
-        df = pd.merge(prices_df, supply_df, on=["symbol", "base_date"], how="left")
-        
-        # 수급 데이터 누락 시 0으로 채움
-        df["foreign_net_buy"] = df["foreign_net_buy"].fillna(0)
-        
-        if df.empty:
-            logger.warning("Merged dataframe is empty. Ensure dates match between Price and Supply tables.")
-            return
+        if supply_df.empty:
+            logger.warning("Supply data is empty. Proceeding with price data only.")
+            df = prices_df.copy()
+            df["foreign_net_buy"] = 0
+        else:
+            # 4. 데이터 병합 (Merge)
+            df = pd.merge(prices_df, supply_df, on=["symbol", "base_date"], how="left")
+            df["foreign_net_buy"] = df["foreign_net_buy"].fillna(0)
+
+        # 날짜 통일 및 정렬 (요구사항 1: strftime 강제 변환)
+        df["base_date"] = pd.to_datetime(df["base_date"]).dt.strftime('%Y-%m-%d')
+        target_pd_date = end_date_str
+
+        # 로드된 전체 데이터의 날짜 범위를 로그로 출력
+        min_date = df["base_date"].min()
+        max_date = df["base_date"].max()
+        logger.info(f"Data Range: {min_date} to {max_date}")
+
+        # 요구사항 2: 전체 결과 볼륨 출력
+        logger.info(f"DB Fetch & Merge Complete. Total rows: {df.shape[0]}")
 
         # 날짜 정렬 (계산을 위해 필수)
         df = df.sort_values(["symbol", "base_date"]).reset_index(drop=True)
@@ -69,25 +79,30 @@ class FeatureGenerator:
         available_at_str = generate_available_at_for_eod(target_date).isoformat()
         
         for symbol, group in df.groupby("symbol"):
+            if symbol not in enabled_symbols:
+                logger.debug(f"Skip symbol {symbol}: Not in enabled_symbols (stocks_master).")
+                continue
+                
             group = group.sort_values("base_date")
             
             # 가격 지표
             close = group["close_price"]
             group["return_5d"] = close.pct_change(5)
-            group["moving_avg_5"] = close.rolling(5).mean()
-            group["moving_avg_20"] = close.rolling(20).mean()
+            group["moving_avg_5"] = close.rolling(5, min_periods=1).mean()
+            group["moving_avg_20"] = close.rolling(20, min_periods=1).mean()
             # 20일 변동성 (수익률의 표준편차)
-            group["volatility_20d"] = close.pct_change().rolling(20).std()
+            group["volatility_20d"] = close.pct_change().rolling(20, min_periods=1).std()
             
             # 수급 지표 (외국인 순매수 Z-Score)
             foreign_buy = group["foreign_net_buy"]
-            f_mean = foreign_buy.rolling(20).mean()
-            f_std = foreign_buy.rolling(20).std()
+            f_mean = foreign_buy.rolling(20, min_periods=1).mean()
+            f_std = foreign_buy.rolling(20, min_periods=1).std()
             group["foreign_flow_zscore"] = (foreign_buy - f_mean) / f_std.replace(0, np.nan)
             
-            # 마지막 날짜(target_date) 행 추출
-            last_row = group[group["base_date"] == end_date_str]
+            # 마지막 날짜(target_date) 행 추출 (요구사항 1)
+            last_row = group[group["base_date"] == target_pd_date]
             if last_row.empty:
+                logger.debug(f"Symbol [{symbol}]: target_date [{target_date.strftime('%Y-%m-%d')}]에 해당하는 시세 데이터가 그룹 내에 존재하지 않음")
                 continue
                 
             row = last_row.iloc[0]
@@ -110,10 +125,13 @@ class FeatureGenerator:
                         "feature_value": float(f_val),
                         "available_at": available_at_str
                     })
+                else:
+                    logger.debug(f"Symbol [{symbol}]: 필요 데이터 20개 중 {len(group)}개만 존재하여 스킵됨 (Feature {f_name} is NaN)")
         # 7. 글로벌 매크로 피처 계산 (Copper/Gold, Gold/Oil Ratio)
         logger.info("Calculating global macro ratios...")
         macro_df = self._fetch_table_data("normalized_global_macro_daily", start_date_str, end_date_str)
         if not macro_df.empty:
+            macro_df["base_date"] = pd.to_datetime(macro_df["base_date"]).dt.strftime('%Y-%m-%d')
             macro_df = macro_df.sort_values("base_date")
             # 금, 구리, 유성(wti) 컬럼 활용
             if "gold" in macro_df.columns and "copper" in macro_df.columns:
@@ -121,7 +139,7 @@ class FeatureGenerator:
             if "gold" in macro_df.columns and "wti" in macro_df.columns:
                 macro_df["gold_oil_ratio"] = macro_df["gold"] / macro_df["wti"]
             
-            last_macro = macro_df[macro_df["base_date"] == end_date_str]
+            last_macro = macro_df[macro_df["base_date"] == target_pd_date]
             if not last_macro.empty:
                 m_row = last_macro.iloc[0]
                 for f_name in ["copper_gold_ratio", "gold_oil_ratio"]:
@@ -136,29 +154,45 @@ class FeatureGenerator:
                         })
 
         # 6. Feature Store 저장
-        if feature_records:
+        # 요구사항 3: 강제 확인 로직
+        record_count = len(feature_records)
+        logger.info(f"Target count to upsert: {record_count}")
+        
+        if record_count > 0:
             self.loader.upsert_records("feature_store_daily", feature_records)
-            logger.info(f"Successfully upserted {len(feature_records)} real features for {target_date}.")
+            logger.info(f"Successfully upserted {record_count} real features for {target_date}.")
         else:
-            logger.warning("No features were generated (might be due to insufficient history).")
+            logger.error(f"ERROR: No features calculated for the given date. Check if input data exists for {target_date}")
 
     def _fetch_table_data(self, table_name: str, start_date: str, end_date: str) -> pd.DataFrame:
         """Supabase에서 특정 기간의 데이터를 DataFrame으로 로드"""
         try:
-            # 쿼리: base_date >= start AND base_date <= end
-            res = self.loader.client.table(table_name).select("*")\
-                .gte("base_date", start_date)\
-                .lte("base_date", end_date)\
-                .execute()
+            # 자동 페이징 기능이 포함된 fetch_all 메서드 호출
+            data = self.loader.fetch_all(table_name=table_name, 
+                                         date_col="base_date", 
+                                         start_date=start_date, 
+                                         end_date=end_date, 
+                                         order_col="base_date", 
+                                         desc=True)
             
-            return pd.DataFrame(res.data)
+            df = pd.DataFrame(data)
+            logger.info(f"Loaded {len(df)} rows from {table_name}")
+            return df
         except Exception as e:
             logger.error(f"Error fetching {table_name}: {e}")
             return pd.DataFrame()
 
     def _load_universe(self):
-        with open("config/stock_universe.json", "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            res = self.loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
+            if res.data:
+                return res.data
+            else:
+                logger.warning("No active stocks found in stocks_master.")
+                return []
+        except Exception as e:
+            logger.error(f"Error loading universe from DB: {e}")
+            return []
 
 def run_job(target_date: date):
     logger.info(f"Starting Real Feature Engineering Job for {target_date}...")

@@ -2,8 +2,12 @@ import json
 import os
 import asyncio
 from typing import List, Dict, Any, Set
+from datetime import timedelta
+
 from src.collectors.kis.domestic import KISDomesticStockCollector
 from src.utils.logger import get_logger
+from src.utils.time_utils import get_current_kst
+from src.loaders.supabase_loader import SupabaseLoader
 
 logger = get_logger(__name__)
 
@@ -17,6 +21,10 @@ class DynamicUniverseLoader:
         self.config = config
         self.collector = collector
         self.static_universe_path = "config/stock_universe.json"
+        
+        supabase_url = config.get("supabase", {}).get("url", "")
+        supabase_key = config.get("supabase", {}).get("service_role_key", "")
+        self.loader = SupabaseLoader(url=supabase_url, key=supabase_key)
 
     async def get_combined_universe(self) -> List[Dict[str, Any]]:
         """
@@ -65,7 +73,45 @@ class DynamicUniverseLoader:
             })
             
         logger.info(f"스마트 유니버스 구성 완료: 총 {len(final_universe)} 종목")
+        
+        # 1. DB stocks_master와 비교하여 신규 편입 종목 식별
+        try:
+            res = self.loader.client.table("stocks_master").select("symbol").execute()
+            existing_symbols = {r["symbol"] for r in res.data} if res.data else set()
+        except Exception as e:
+            logger.error(f"Failed to fetch stocks_master: {e}")
+            existing_symbols = set()
+            
+        new_symbols = [u["symbol"] for u in final_universe if u["symbol"] not in existing_symbols]
+        
+        if new_symbols:
+            logger.info(f"새로 식별된 신규 편입 종목: {len(new_symbols)}건. 백필을 시작합니다.")
+            await self.trigger_auto_backfill(new_symbols)
+        else:
+            logger.info("신규 편입 종목이 없습니다. 백필을 생략합니다.")
+            
         return final_universe
+
+    async def trigger_auto_backfill(self, symbols: List[str]):
+        """
+        신규 편입 종목에 대해 과거 60영업일 치 데이터를 즉시 수집하여 적재.
+        """
+        end_dt = get_current_kst()
+        start_dt = end_dt - timedelta(days=90) # 주말, 공휴일 감안 90일
+        start_date_str = start_dt.strftime("%Y%m%d")
+        end_date_str = end_dt.strftime("%Y%m%d")
+        
+        for idx, symbol in enumerate(symbols):
+            logger.info(f"[{idx+1}/{len(symbols)}] 자동 백필 진행 중 - {symbol}")
+            try:
+                await self.collector.fetch_ohlcv(symbol, timeframe='D', 
+                                              start_date=start_date_str, 
+                                              end_date=end_date_str)
+            except Exception as e:
+                logger.error(f"백필 실패 - {symbol}: {e}")
+            
+            # Rate Limit 준수: 초당 2건 처리 제한 
+            await asyncio.sleep(0.5)
 
     async def _load_category_0(self) -> List[Dict[str, str]]:
         """Category 0 (Custom): 기존 static JSON 유니버스"""

@@ -2,8 +2,12 @@ name: Daily Data Sync
 
 on:
   schedule:
-    - cron: '0 1,4,7,10,13,16,19,22 * * *' # KST 10, 13, 16, 19, 22, 01, 04, 07시 실행
+    - cron: '0 1,3,5,7,9,11,13,15,17,19,21,23 * * *' # KST 낮과 밤 모두 2시간 간격 대응
   workflow_dispatch: # 수동 실행 지원
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: true
 
 jobs:
   build:
