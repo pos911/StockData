@@ -84,14 +84,23 @@ class FeatureGenerator:
                 continue
                 
             group = group.sort_values("base_date")
+            n_rows = len(group)
+            
+            if symbol == "278470":
+                logger.info(f"[APR_TARGETING] 에이피알(278470) 처리 시작. 총 데이터 수: {n_rows} 건. 최신 일자: {group['base_date'].max() if not group.empty else '없음'}")
             
             # 가격 지표
             close = group["close_price"]
-            group["return_5d"] = close.pct_change(5)
+            
+            # 데이터 개수에 비례하여 return 계산 (최대 5일)
+            period_5 = min(5, n_rows - 1) if n_rows > 1 else 1
+            group["return_5d"] = close.pct_change(period_5) if n_rows > 1 else 0.0
+            
             group["moving_avg_5"] = close.rolling(5, min_periods=1).mean()
             group["moving_avg_20"] = close.rolling(20, min_periods=1).mean()
+            
             # 20일 변동성 (수익률의 표준편차)
-            group["volatility_20d"] = close.pct_change().rolling(20, min_periods=1).std()
+            group["volatility_20d"] = close.pct_change().rolling(20, min_periods=1).std() if n_rows > 1 else 0.0
             
             # 수급 지표 (외국인 순매수 Z-Score)
             foreign_buy = group["foreign_net_buy"]
@@ -102,19 +111,22 @@ class FeatureGenerator:
             # 마지막 날짜(target_date) 행 추출 (요구사항 1)
             last_row = group[group["base_date"] == target_pd_date]
             if last_row.empty:
-                logger.debug(f"Symbol [{symbol}]: target_date [{target_date.strftime('%Y-%m-%d')}]에 해당하는 시세 데이터가 그룹 내에 존재하지 않음")
+                if symbol == "278470":
+                    logger.error(f"[APR_TARGETING] 에이피알(278470) 타겟 일자({target_pd_date}) 시세 데이터 없음. 현재 그룹된 데이터 확인 요망.")
+                else:
+                    logger.debug(f"Symbol [{symbol}]: target_date [{target_pd_date}]에 해당하는 시세 데이터가 그룹 내에 존재하지 않음")
                 continue
                 
             row = last_row.iloc[0]
             
-            # 결과물 리스트업
+            # 결과물 리스트업 (volume 등 당일 데이터만 있어도 수집)
             targets = {
-                "return_5d": row.get("return_5d"),
+                "return_5d": row.get("return_5d", 0.0),
                 "moving_avg_5": row.get("moving_avg_5"),
                 "moving_avg_20": row.get("moving_avg_20"),
-                "volatility_20d": row.get("volatility_20d"),
+                "volatility_20d": row.get("volatility_20d", 0.0),
                 "foreign_flow_zscore": row.get("foreign_flow_zscore"),
-                "volume": row.get("volume")
+                "volume": row.get("volume", 0)
             }
             
             for f_name, f_val in targets.items():
@@ -127,7 +139,9 @@ class FeatureGenerator:
                         "available_at": available_at_str
                     })
                 else:
-                    logger.debug(f"Symbol [{symbol}]: 필요 데이터 20개 중 {len(group)}개만 존재하여 스킵됨 (Feature {f_name} is NaN)")
+                    if symbol == "278470":
+                        logger.warning(f"[APR_TARGETING] 에이피알(278470) 피처 누락: {f_name} 값이 NaN (총 데이터 수: {n_rows}건)")
+                    logger.debug(f"Symbol [{symbol}]: 필요 데이터 부족(총 {n_rows}개 뿐)으로 스킵됨 (Feature {f_name} is NaN)")
         # 7. 글로벌 매크로 피처 계산 (Copper/Gold, Gold/Oil Ratio)
         logger.info("Calculating global macro ratios...")
         macro_df = self._fetch_table_data("normalized_global_macro_daily", start_date_str, end_date_str)
