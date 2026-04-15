@@ -113,7 +113,8 @@ class FeatureGenerator:
                 "moving_avg_5": row.get("moving_avg_5"),
                 "moving_avg_20": row.get("moving_avg_20"),
                 "volatility_20d": row.get("volatility_20d"),
-                "foreign_flow_zscore": row.get("foreign_flow_zscore")
+                "foreign_flow_zscore": row.get("foreign_flow_zscore"),
+                "volume": row.get("volume")
             }
             
             for f_name, f_val in targets.items():

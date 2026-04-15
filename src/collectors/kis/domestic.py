@@ -67,14 +67,18 @@ class KISDomesticStockCollector(KISBaseCollector):
         for row in data["output"]:
             base_date = row.get("stck_bsop_date")
             formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}" if base_date else ""
+            
+            def _parse_int(val):
+                return int(val) if val else 0
+                
             records.append({
                 "symbol": symbol,
                 "base_date": formatted_date,
-                "individual_net_buy": int(row.get("prsn_ntby_qty", 0)),
-                "institutional_net_buy": int(row.get("orgn_ntby_qty", 0)),
-                "foreign_net_buy": int(row.get("frgn_ntby_qty", 0)),
-                "pension_net_buy": int(row.get("pnsn_ntby_qty", 0)),
-                "corporate_net_buy": int(row.get("etc_corp_ntby_qty", 0)),
+                "individual_net_buy": _parse_int(row.get("prsn_ntby_qty", 0)),
+                "institutional_net_buy": _parse_int(row.get("orgn_ntby_qty", 0)),
+                "foreign_net_buy": _parse_int(row.get("frgn_ntby_qty", 0)),
+                "pension_net_buy": _parse_int(row.get("pnsn_ntby_qty", 0)),
+                "corporate_net_buy": _parse_int(row.get("etc_corp_ntby_qty", 0)),
                 "source": "KIS",
                 "available_at": available_at or datetime.now().isoformat()
             })

@@ -55,6 +55,18 @@ async def run_pipeline(target_date: date, limit: int = None):
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     corp_code_map = opendart_collector.fetch_corp_code_map()
     
+    # Ensure all active stocks in stocks_master are included
+    try:
+        res = loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
+        active_stocks = res.data if res.data else []
+        universe_symbols = {u["symbol"] for u in universe}
+        for s in active_stocks:
+            if s["symbol"] not in universe_symbols:
+                universe.append({"symbol": s["symbol"], "name": s["name"], "source_category": "active_master"})
+                logger.info(f"Added manual active stock from DB: {s['name']} ({s['symbol']})")
+    except Exception as e:
+        logger.error(f"Failed to load active stocks from master: {e}")
+
     available_at = generate_available_at_for_eod(target_date)
     timestamp_now = get_current_kst()
     total_processed = 0
