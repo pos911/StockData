@@ -114,15 +114,14 @@ class DynamicUniverseLoader:
             await asyncio.sleep(0.5)
 
     async def _load_category_0(self) -> List[Dict[str, str]]:
-        """Category 0 (Custom): 기존 static JSON 유니버스"""
+        """Category 0 (Master Active): stocks_master 테이블에서 is_active=true인 종목 조회"""
         try:
-            if not os.path.exists(self.static_universe_path):
-                return []
-            with open(self.static_universe_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return [{"code": s["symbol"], "name": s["name"]} for s in data if s.get("enabled", True)]
+            res = self.loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
+            if res.data:
+                return [{"code": s["symbol"], "name": s["name"]} for s in res.data]
+            return []
         except Exception as e:
-            logger.error(f"Category 0 loading error: {e}")
+            logger.error(f"Category 0 loading error (stocks_master): {e}")
             return []
 
     async def _load_category_1(self) -> List[Dict[str, str]]:
