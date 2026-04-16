@@ -79,6 +79,12 @@ def run_pipeline(target_date: date):
                 
                 # 정규화
                 norm_records = MacroNormalizer.normalize_fred(series_id, obs, available_at)
+                for r in norm_records:
+                    keys_to_remove = [k for k in list(r.keys()) if k not in ['series_id', 'base_date', 'value']]
+                    for k in keys_to_remove:
+                        r.pop(k, None)
+                    if 'value' in r and r['value'] is not None:
+                        r['value'] = float(r['value'])
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
 
@@ -104,9 +110,7 @@ def run_pipeline(target_date: date):
                             norm_records.append({
                                 "series_id": endpoint_key,
                                 "base_date": dt[:10],
-                                "value": float(val),
-                                "source": "TradingEconomics",
-                                "available_at": available_at.isoformat()
+                                "value": float(val)
                             })
                     if norm_records:
                         loader.upsert_records("normalized_macro_series", norm_records)
@@ -122,9 +126,7 @@ def run_pipeline(target_date: date):
                     norm_record = {
                         "series_id": series_id,
                         "base_date": df.index[-1].strftime("%Y-%m-%d"),
-                        "value": float(df["Close"].iloc[-1]),
-                        "source": "YAHOO",
-                        "available_at": available_at.isoformat()
+                        "value": float(df["Close"].iloc[-1])
                     }
                     loader.upsert_records("normalized_macro_series", [norm_record])
                     total_processed += 1

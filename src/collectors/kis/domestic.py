@@ -69,16 +69,30 @@ class KISDomesticStockCollector(KISBaseCollector):
             formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}" if base_date else ""
             
             def _parse_int(val):
-                return int(val) if val else 0
+                if val is None or val == "":
+                    return 0
+                try:
+                    return int(float(str(val).replace(",", "").strip()))
+                except ValueError:
+                    return 0
                 
+            ind = _parse_int(row.get("prsn_ntby_qty", 0))
+            inst = _parse_int(row.get("orgn_ntby_qty", 0))
+            forgn = _parse_int(row.get("frgn_ntby_qty", 0))
+            pen = _parse_int(row.get("pnsn_ntby_qty", 0))
+            corp = _parse_int(row.get("etc_corp_ntby_qty", 0))
+
+            if ind == 0 and inst == 0 and forgn == 0 and pen == 0 and corp == 0:
+                logger.warning(f"WARNING: Zero flow detected for {symbol}")
+
             records.append({
                 "symbol": symbol,
                 "base_date": formatted_date,
-                "individual_net_buy": _parse_int(row.get("prsn_ntby_qty", 0)),
-                "institutional_net_buy": _parse_int(row.get("orgn_ntby_qty", 0)),
-                "foreign_net_buy": _parse_int(row.get("frgn_ntby_qty", 0)),
-                "pension_net_buy": _parse_int(row.get("pnsn_ntby_qty", 0)),
-                "corporate_net_buy": _parse_int(row.get("etc_corp_ntby_qty", 0)),
+                "individual_net_buy": ind,
+                "institutional_net_buy": inst,
+                "foreign_net_buy": forgn,
+                "pension_net_buy": pen,
+                "corporate_net_buy": corp,
                 "source": "KIS",
                 "available_at": available_at or datetime.now().isoformat()
             })
