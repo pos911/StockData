@@ -26,8 +26,7 @@ def run_pipeline(target_date: date):
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     fred = FREDCollector(api_key=config.get("fred", {}).get("api_key", ""))
     
-    from src.collectors.tradingeconomics_collector import TradingEconomicsCollector
-    te_collector = TradingEconomicsCollector(client_key=config.get("tradingeconomics", {}).get("api_key", ""))
+
     
     import yfinance as yf
     
@@ -87,34 +86,6 @@ def run_pipeline(target_date: date):
                         r['value'] = float(r['value'])
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
-
-        elif source == "TradingEconomics":
-            endpoint_key = series.get("endpoint_key", "")
-            if "_" in endpoint_key:
-                # e.g., south_korea_interest_rate -> country: south korea, indicator: interest rate
-                parts = endpoint_key.split("_")
-                indicator = parts[-1]
-                country = " ".join(parts[:-1])
-                
-                logger.info(f"Fetching TradingEconomics: {country} / {indicator}")
-                raw_data = te_collector.fetch_indicator(country, indicator)
-                
-                if raw_data:
-                    # TradingEconomics response is often a list of historical values
-                    # We take the most recent ones
-                    norm_records = []
-                    for item in raw_data[-5:]: # 최근 5건 정도
-                        dt = item.get("DateTime") # e.g. "2024-03-01T00:00:00"
-                        val = item.get("Value")
-                        if dt and val is not None:
-                            norm_records.append({
-                                "series_id": endpoint_key,
-                                "base_date": dt[:10],
-                                "value": float(val)
-                            })
-                    if norm_records:
-                        loader.upsert_records("normalized_macro_series", norm_records)
-                        total_processed += len(norm_records)
 
         elif source == "YAHOO":
             series_id = series.get("series_id")

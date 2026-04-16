@@ -14,11 +14,11 @@
     "enabled": true
   },
   {
-    "source": "TradingEconomics",
-    "endpoint_key": "south_korea_interest_rate",
-    "name": "South Korea Interest Rate",
+    "source": "FRED",
+    "series_id": "INTDSRKRM193N",
+    "name": "South Korea Policy Rate (via FRED)",
     "frequency": "Monthly",
-    "enabled": false
+    "enabled": true
   },
   {
     "source": "YAHOO",
