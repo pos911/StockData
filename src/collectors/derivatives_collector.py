@@ -21,19 +21,30 @@ class DerivativesCollector:
         try:
             # 1. KOSPI 200 지수 (Spot) 조회
             df_index = stock.get_index_ohlcv_by_date(target_dt_str, target_dt_str, "101")
-            
+
             if df_index.empty:
                 logger.warning(f"No index data found for {target_dt_str}")
                 return None
-            
-            kospi200_spot = float(df_index.iloc[0]["종가"])
-            
-            # 2. 선물 지수 및 미결제약정 방어 로직
-            # 파생상품 API 연동 전까지 선물을 현물과 동일하게 맵핑하고 베이시스를 0.0으로 고정
+
+            row0 = df_index.iloc[0]
+            # KRX 컬럼명이 변경될 수 있으므로 동적으로 조회
+            cols = list(df_index.columns)
+            logger.debug(f"KRX index columns: {cols}")
+
+            # 종가 컬럼 탐색 ('종가' 혹은 첫 번째 수치 컬럼 fallback)
+            close_col = "종가" if "종가" in cols else next((c for c in cols if "가" in c), cols[0])
+            volume_col = "거래량" if "거래량" in cols else next((c for c in cols if "량" in c), None)
+
+            try:
+                kospi200_spot = float(row0[close_col])
+            except (KeyError, TypeError, ValueError) as e:
+                logger.error(f"Failed to read KOSPI200 close price: {e}. Columns: {cols}")
+                return None
+
             kospi200_futures = kospi200_spot
             futures_basis = 0.0
-            open_interest = int(df_index.iloc[0].get("거래량", 0))
-            
+            open_interest = int(row0[volume_col]) if volume_col and volume_col in cols else 0
+
             return {
                 "base_date": target_date.strftime("%Y-%m-%d"),
                 "kospi200_futures": kospi200_futures,
@@ -42,6 +53,9 @@ class DerivativesCollector:
                 "night_futures_return": 0.0,
                 "expiration_flag": self._is_expiration_date(target_date)
             }
+        except (ValueError, KeyError) as e:
+            logger.error(f"Derivatives data parsing error: {e}")
+            return None
         except Exception as e:
             logger.error(f"Error fetching derivatives data: {e}")
             return None

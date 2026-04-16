@@ -6,6 +6,26 @@ from datetime import datetime
 
 logger = get_logger(__name__)
 
+
+def _parse_int(val) -> int:
+    """안전한 정수 파싱 (None, 빈 문자열, 비정규 포맷 모두 0으로 처리)"""
+    if val is None or val == "":
+        return 0
+    try:
+        return int(float(str(val).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _parse_float(val) -> float:
+    """안전한 부동소수점 파싱 (None, 빈 문자열, 비정규 포맷 모두 0.0으로 처리)"""
+    if val is None or val == "":
+        return 0.0
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
 class KISDomesticStockCollector(KISBaseCollector):
     """국내 주식 시장 데이터 수집기"""
 
@@ -33,19 +53,34 @@ class KISDomesticStockCollector(KISBaseCollector):
         for row in data["output2"]:
             base_date = row.get("stck_bsop_date")
             formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}" if base_date else ""
+            close = _parse_int(row.get("stck_clpr", 0))
+            # 시가총액 자체 계산 (FHPST01740000 404 우회용 Fallback)
+            # output1의 lstn_stcn(상장주식수)을 활용, output2에는 없으므로 hts_avls 또는 0 이월 처리
+            listed_shares = _parse_int(row.get("lstn_stcn") or row.get("hts_avls") or 0)
+            market_cap = close * listed_shares if listed_shares > 0 else None
             records.append({
                 "symbol": symbol,
                 "base_date": formatted_date,
-                "open_price": int(row.get("stck_oprc", 0)),
-                "high_price": int(row.get("stck_hgpr", 0)),
-                "low_price": int(row.get("stck_lwpr", 0)),
-                "close_price": int(row.get("stck_clpr", 0)),
-                "volume": int(row.get("acml_vol", 0)),
-                "trading_value": int(row.get("acml_tr_pbmn", 0)),
+                "open_price": _parse_int(row.get("stck_oprc", 0)),
+                "high_price": _parse_int(row.get("stck_hgpr", 0)),
+                "low_price": _parse_int(row.get("stck_lwpr", 0)),
+                "close_price": close,
+                "volume": _parse_int(row.get("acml_vol", 0)),
+                "trading_value": _parse_int(row.get("acml_tr_pbmn", 0)),
+                "market_cap": market_cap,
                 "source": "KIS",
                 "available_at": available_at or datetime.now().isoformat()
             })
-            
+
+        # market_cap Forward-fill: None인 경우 이전 row의 값으로 채우기
+        prev_cap = None
+        for r in records:
+            if r["market_cap"] is None and prev_cap is not None:
+                r["market_cap"] = prev_cap
+                logger.debug(f"[{symbol}] market_cap forward-filled with {prev_cap}")
+            if r["market_cap"] is not None:
+                prev_cap = r["market_cap"]
+
         await self.upsert_records("normalized_stock_prices_daily", records)
         return records
 
@@ -67,15 +102,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         for row in data["output"]:
             base_date = row.get("stck_bsop_date")
             formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}" if base_date else ""
-            
-            def _parse_int(val):
-                if val is None or val == "":
-                    return 0
-                try:
-                    return int(float(str(val).replace(",", "").strip()))
-                except ValueError:
-                    return 0
-                
+
             ind = _parse_int(row.get("prsn_ntby_qty", 0))
             inst = _parse_int(row.get("orgn_ntby_qty", 0))
             forgn = _parse_int(row.get("frgn_ntby_qty", 0))
@@ -123,13 +150,13 @@ class KISDomesticStockCollector(KISBaseCollector):
             records.append({
                 "symbol": symbol,
                 "base_date": formatted_date,
-                "short_volume": int(row.get("ssts_cntg_qty", 0)), # 공식 필드명: ssts_cntg_qty
-                "short_value": int(row.get("ssts_tr_pbmn", 0)),   # 공식 필드명: ssts_tr_pbmn
-                "short_ratio": float(row.get("short_sell_vol_rate", 0)),
+                "short_volume": _parse_int(row.get("ssts_cntg_qty", 0)),
+                "short_value": _parse_int(row.get("ssts_tr_pbmn", 0)),
+                "short_ratio": _parse_float(row.get("short_sell_vol_rate", 0)),
                 "source": "KIS",
                 "available_at": available_at or datetime.now().isoformat()
             })
-            
+
         await self.upsert_records("normalized_stock_short_selling", records)
         return records
 

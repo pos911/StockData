@@ -78,7 +78,30 @@ async def run_pipeline(target_date: date, limit: int = None):
         
         try:
             logger.info(f"Processing {name} ({symbol})")
-            
+
+            # --- 신규 편입 종목 자동 백필 ---
+            # DB에 저장된 백데이터수가 20일 미만이면 30일치 강제 백필
+            try:
+                from datetime import timedelta as _td
+                _count_res = loader.client.table("normalized_stock_prices_daily") \
+                    .select("base_date", count="exact") \
+                    .eq("symbol", symbol) \
+                    .execute()
+                _hist_count = _count_res.count if hasattr(_count_res, 'count') and _count_res.count else len(_count_res.data or [])
+                if _hist_count < 20:
+                    logger.info(f"[Backfill] {symbol} has only {_hist_count} days. Backfilling 30 days...")
+                    _bf_start = (target_date - _td(days=35)).strftime("%Y%m%d")
+                    _bf_end = (target_date - _td(days=1)).strftime("%Y%m%d")
+                    await kis_collector.fetch_ohlcv(
+                        symbol, timeframe='D',
+                        start_date=_bf_start,
+                        end_date=_bf_end,
+                        available_at=available_at.isoformat()
+                    )
+                    logger.info(f"[Backfill] {symbol} backfill complete.")
+            except Exception as _bf_err:
+                logger.warning(f"[Backfill] {symbol} backfill failed (non-fatal): {_bf_err}")
+
             # 4. stocks_master update
             master_data = StockNormalizer.normalize_stock_master(symbol, name, "DYNAMIC")
             loader.upsert_records("stocks_master", [master_data])

@@ -168,6 +168,62 @@ class FeatureGenerator:
                             "available_at": available_at_str
                         })
 
+        # 8. 매크로 모멘텀 피쳐 계산 (1d/5d 변화율)
+        # normalized_macro_series에서 주요 시리즈의 최근 10일치를 불러와 변화율 계산
+        logger.info("Calculating macro momentum features (1d/5d change rates)...")
+        MACRO_MOMENTUM_SERIES = {
+            "DGS10":            "macro_us10y",
+            "INTDSRKRM193N":    "macro_kr_rate",
+            "BAMLH0A0HYM2":     "macro_hy_spread",
+        }
+        try:
+            _ms_start = (target_date - timedelta(days=14)).strftime("%Y-%m-%d")
+            _ms_end = end_date_str
+            _ms_data = self.loader.fetch_all(
+                table_name="normalized_macro_series",
+                date_col="base_date",
+                start_date=_ms_start,
+                end_date=_ms_end,
+                order_col="base_date",
+                desc=False
+            )
+            _ms_df = pd.DataFrame(_ms_data)
+            if not _ms_df.empty and "series_id" in _ms_df.columns:
+                _ms_df["base_date"] = pd.to_datetime(_ms_df["base_date"]).dt.strftime('%Y-%m-%d')
+                _ms_df["value"] = pd.to_numeric(_ms_df["value"], errors="coerce")
+                for series_id, feat_prefix in MACRO_MOMENTUM_SERIES.items():
+                    _s = _ms_df[_ms_df["series_id"] == series_id].sort_values("base_date")
+                    if len(_s) < 2:
+                        continue
+                    _last = _s[_s["base_date"] <= target_pd_date].tail(1)
+                    if _last.empty:
+                        continue
+                    _cur_val = _last.iloc[0]["value"]
+                    # 1일 전 대비 변화율
+                    _prev1 = _s[_s["base_date"] < _last.iloc[0]["base_date"]].tail(1)
+                    if not _prev1.empty and _prev1.iloc[0]["value"] != 0:
+                        chg1d = (_cur_val - _prev1.iloc[0]["value"]) / abs(_prev1.iloc[0]["value"]) * 100
+                        feature_records.append({
+                            "symbol": "GLOBAL",
+                            "base_date": end_date_str,
+                            "feature_name": f"{feat_prefix}_1d_chg",
+                            "feature_value": float(chg1d),
+                            "available_at": available_at_str
+                        })
+                    # 5일 전 대비 변화율
+                    _prev5 = _s[_s["base_date"] < _last.iloc[0]["base_date"]].tail(5).head(1)
+                    if not _prev5.empty and _prev5.iloc[0]["value"] != 0:
+                        chg5d = (_cur_val - _prev5.iloc[0]["value"]) / abs(_prev5.iloc[0]["value"]) * 100
+                        feature_records.append({
+                            "symbol": "GLOBAL",
+                            "base_date": end_date_str,
+                            "feature_name": f"{feat_prefix}_5d_chg",
+                            "feature_value": float(chg5d),
+                            "available_at": available_at_str
+                        })
+        except Exception as _me:
+            logger.warning(f"Macro momentum feature calculation failed (non-fatal): {_me}")
+
         # 6. Feature Store 저장
         # 요구사항 3: 강제 확인 로직
         record_count = len(feature_records)
