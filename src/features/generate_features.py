@@ -142,23 +142,25 @@ class FeatureGenerator:
                     if symbol == "278470":
                         logger.warning(f"[APR_TARGETING] 에이피알(278470) 피처 누락: {f_name} 값이 NaN (총 데이터 수: {n_rows}건)")
                     logger.debug(f"Symbol [{symbol}]: 필요 데이터 부족(총 {n_rows}개 뿐)으로 스킵됨 (Feature {f_name} is NaN)")
-        # 7. 글로벌 매크로 피처 계산 (Copper/Gold, Gold/Oil Ratio)
-        logger.info("Calculating global macro ratios...")
+        # 7. 글로벌 매크로 피처 계산 (비율 + 자동 모멘텀)
+        logger.info("Calculating global macro features (ratios + momentum)...")
         macro_df = self._fetch_table_data("normalized_global_macro_daily", start_date_str, end_date_str)
         if not macro_df.empty:
             macro_df["base_date"] = pd.to_datetime(macro_df["base_date"]).dt.strftime('%Y-%m-%d')
             macro_df = macro_df.sort_values("base_date").reset_index(drop=True)
-            # 한/미 휴장일 차이로 발생하는 Null 보정 (Forward-fill)
-            macro_df = macro_df.ffill()
-            # 금, 구리, 유성(wti) 컬럼 활용
+            # 한/미 휴장일 차이로 발생하는 Null 보정 (ffill → bfill 순차 적용)
+            macro_df = macro_df.ffill().bfill()
+
+            # 비율 지표 계산
             if "gold" in macro_df.columns and "copper" in macro_df.columns:
                 macro_df["copper_gold_ratio"] = macro_df["copper"] / macro_df["gold"]
             if "gold" in macro_df.columns and "wti" in macro_df.columns:
                 macro_df["gold_oil_ratio"] = macro_df["gold"] / macro_df["wti"]
-            
+
             last_macro = macro_df[macro_df["base_date"] == target_pd_date]
             if not last_macro.empty:
                 m_row = last_macro.iloc[0]
+                # 기본 비율 피처
                 for f_name in ["copper_gold_ratio", "gold_oil_ratio"]:
                     f_val = m_row.get(f_name)
                     if pd.notnull(f_val):
@@ -170,14 +172,43 @@ class FeatureGenerator:
                             "available_at": available_at_str
                         })
 
-        # 8. 매크로 모멘텀 피쳐 계산 (1d/5d 변화율)
-        # normalized_macro_series에서 주요 시리즈의 최근 10일치를 불러와 변화율 계산
-        logger.info("Calculating macro momentum features (1d/5d change rates)...")
-        MACRO_MOMENTUM_SERIES = {
-            "DGS10":            "macro_us10y",
-            "INTDSRKRM193N":    "macro_kr_rate",
-            "BAMLH0A0HYM2":     "macro_hy_spread",
-        }
+                # 모든 수치 컬럼에 대해 1d/5d 변화율 자동 계산 (일반화)
+                numeric_cols = macro_df.select_dtypes(include=[np.number]).columns.tolist()
+                skip_cols = {"copper_gold_ratio", "gold_oil_ratio"}  # 파생 비율은 제외
+                for col in numeric_cols:
+                    if col in skip_cols:
+                        continue
+                    col_series = macro_df[macro_df["base_date"] <= target_pd_date][col]
+                    if len(col_series) < 2:
+                        continue
+                    cur = col_series.iloc[-1]
+                    # 1d 변화율
+                    if len(col_series) >= 2:
+                        prev1 = col_series.iloc[-2]
+                        chg1d = (cur / pd.Series([prev1]).replace(0, np.nan).iloc[0]) - 1
+                        if np.isfinite(chg1d):
+                            feature_records.append({
+                                "symbol": "GLOBAL",
+                                "base_date": end_date_str,
+                                "feature_name": f"macro_{col}_1d_chg",
+                                "feature_value": float(chg1d),
+                                "available_at": available_at_str
+                            })
+                    # 5d 변화율
+                    if len(col_series) >= 6:
+                        prev5 = col_series.iloc[-6]
+                        chg5d = (cur / pd.Series([prev5]).replace(0, np.nan).iloc[0]) - 1
+                        if np.isfinite(chg5d):
+                            feature_records.append({
+                                "symbol": "GLOBAL",
+                                "base_date": end_date_str,
+                                "feature_name": f"macro_{col}_5d_chg",
+                                "feature_value": float(chg5d),
+                                "available_at": available_at_str
+                            })
+
+        # 8. normalized_macro_series 모멘텀 피처 (ffill+bfill 보정)
+        logger.info("Calculating macro_series momentum features...")
         try:
             _ms_start = (target_date - timedelta(days=14)).strftime("%Y-%m-%d")
             _ms_end = end_date_str
@@ -193,39 +224,44 @@ class FeatureGenerator:
             if not _ms_df.empty and "series_id" in _ms_df.columns:
                 _ms_df["base_date"] = pd.to_datetime(_ms_df["base_date"]).dt.strftime('%Y-%m-%d')
                 _ms_df["value"] = pd.to_numeric(_ms_df["value"], errors="coerce")
-                # 시리즈별로 ffill 적용 (휴장 Null 보정)
+                # 시리즈별로 ffill → bfill 순차 적용 (휴장 Null 보정)
                 _ms_df = _ms_df.sort_values(["series_id", "base_date"]).reset_index(drop=True)
-                _ms_df["value"] = _ms_df.groupby("series_id")["value"].ffill()
-                for series_id, feat_prefix in MACRO_MOMENTUM_SERIES.items():
-                    _s = _ms_df[_ms_df["series_id"] == series_id].sort_values("base_date")
-                    if len(_s) < 2:
-                        continue
+                _ms_df["value"] = _ms_df.groupby("series_id")["value"].transform(lambda x: x.ffill().bfill())
+
+                # 모든 series_id에 대해 자동 변화율 계산 (하드코딩 제거)
+                for series_id, _grp in _ms_df.groupby("series_id"):
+                    _s = _grp.sort_values("base_date")
+                    feat_prefix = f"macro_{series_id.lower().replace(' ', '_')}"
                     _last = _s[_s["base_date"] <= target_pd_date].tail(1)
                     if _last.empty:
                         continue
                     _cur_val = _last.iloc[0]["value"]
-                    # 1일 전 대비 변화율
+                    # 1일 전 변화율
                     _prev1 = _s[_s["base_date"] < _last.iloc[0]["base_date"]].tail(1)
-                    if not _prev1.empty and _prev1.iloc[0]["value"] != 0:
-                        chg1d = (_cur_val - _prev1.iloc[0]["value"]) / abs(_prev1.iloc[0]["value"]) * 100
-                        feature_records.append({
-                            "symbol": "GLOBAL",
-                            "base_date": end_date_str,
-                            "feature_name": f"{feat_prefix}_1d_chg",
-                            "feature_value": float(chg1d),
-                            "available_at": available_at_str
-                        })
-                    # 5일 전 대비 변화율
+                    if not _prev1.empty:
+                        _p1 = _prev1.iloc[0]["value"]
+                        chg1d = (_cur_val / _p1) - 1 if _p1 != 0 else np.nan
+                        if np.isfinite(chg1d):
+                            feature_records.append({
+                                "symbol": "GLOBAL",
+                                "base_date": end_date_str,
+                                "feature_name": f"{feat_prefix}_1d_chg",
+                                "feature_value": float(chg1d),
+                                "available_at": available_at_str
+                            })
+                    # 5일 전 변화율
                     _prev5 = _s[_s["base_date"] < _last.iloc[0]["base_date"]].tail(5).head(1)
-                    if not _prev5.empty and _prev5.iloc[0]["value"] != 0:
-                        chg5d = (_cur_val - _prev5.iloc[0]["value"]) / abs(_prev5.iloc[0]["value"]) * 100
-                        feature_records.append({
-                            "symbol": "GLOBAL",
-                            "base_date": end_date_str,
-                            "feature_name": f"{feat_prefix}_5d_chg",
-                            "feature_value": float(chg5d),
-                            "available_at": available_at_str
-                        })
+                    if not _prev5.empty:
+                        _p5 = _prev5.iloc[0]["value"]
+                        chg5d = (_cur_val / _p5) - 1 if _p5 != 0 else np.nan
+                        if np.isfinite(chg5d):
+                            feature_records.append({
+                                "symbol": "GLOBAL",
+                                "base_date": end_date_str,
+                                "feature_name": f"{feat_prefix}_5d_chg",
+                                "feature_value": float(chg5d),
+                                "available_at": available_at_str
+                            })
         except Exception as _me:
             logger.warning(f"Macro momentum feature calculation failed (non-fatal): {_me}")
 
