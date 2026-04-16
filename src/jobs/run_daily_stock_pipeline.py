@@ -70,6 +70,12 @@ async def run_pipeline(target_date: date, limit: int = None):
     available_at = generate_available_at_for_eod(target_date)
     timestamp_now = get_current_kst()
     total_processed = 0
+
+    # 백필 배치 버퍼 (루프 종료 후 1회 일괄 적재)
+    price_buf: list = []
+    supply_buf: list = []
+    ratio_buf: list = []
+    master_buf: list = []
     
     # 3. Collection Loop
     for stock in universe:
@@ -79,8 +85,8 @@ async def run_pipeline(target_date: date, limit: int = None):
         try:
             logger.info(f"Processing {name} ({symbol})")
 
-            # --- 신규 편입 종목 자동 백필 ---
-            # DB에 저장된 백데이터수가 20일 미만이면 30일치 강제 백필
+            # --- 신규 편입 종목 자동 백필 (배치 버퍼 방식) ---
+            # DB에 저장된 과거 데이터가 20일 미만이면 30일치 백필 후 버퍼에 누적
             try:
                 from datetime import timedelta as _td
                 _count_res = loader.client.table("normalized_stock_prices_daily") \
@@ -89,16 +95,36 @@ async def run_pipeline(target_date: date, limit: int = None):
                     .execute()
                 _hist_count = _count_res.count if hasattr(_count_res, 'count') and _count_res.count else len(_count_res.data or [])
                 if _hist_count < 20:
-                    logger.info(f"[Backfill] {symbol} has only {_hist_count} days. Backfilling 30 days...")
+                    logger.info(f"[Backfill] {symbol} has only {_hist_count} days. Buffering 30-day backfill...")
                     _bf_start = (target_date - _td(days=35)).strftime("%Y%m%d")
                     _bf_end = (target_date - _td(days=1)).strftime("%Y%m%d")
-                    await kis_collector.fetch_ohlcv(
+
+                    # a) OHLCV 30일치 -> price_buf
+                    _bf_prices = await kis_collector.fetch_ohlcv(
                         symbol, timeframe='D',
-                        start_date=_bf_start,
-                        end_date=_bf_end,
+                        start_date=_bf_start, end_date=_bf_end,
                         available_at=available_at.isoformat()
                     )
-                    logger.info(f"[Backfill] {symbol} backfill complete.")
+                    if _bf_prices:
+                        price_buf.extend(_bf_prices)
+                    await asyncio.sleep(0.2)
+
+                    # b) 투자자 동향 30일치 -> supply_buf (fetch_investor_trend 내부 upsert 없이 반환값 사용)
+                    _bf_supply = await kis_collector.fetch_investor_trend(symbol, available_at=available_at.isoformat())
+                    if _bf_supply:
+                        supply_buf.extend(_bf_supply)
+                    await asyncio.sleep(0.2)
+
+                    # c) 기본정보(시가총액/PER/PBR 등) -> ratio_buf
+                    _bf_ratio = await kis_collector.fetch_fundamental_info(
+                        symbol, base_date=target_date.strftime("%Y-%m-%d"),
+                        available_at=available_at.isoformat()
+                    )
+                    if _bf_ratio:
+                        ratio_buf.append(_bf_ratio)
+                    await asyncio.sleep(0.2)
+
+                    logger.info(f"[Backfill] {symbol} buffered.")
             except Exception as _bf_err:
                 logger.warning(f"[Backfill] {symbol} backfill failed (non-fatal): {_bf_err}")
 
@@ -172,7 +198,18 @@ async def run_pipeline(target_date: date, limit: int = None):
             logger.error(f"Failed to process {symbol} ({name}): {e}", exc_info=True)
             continue
 
-    # 8. Cleanup
+    # 8. 배치 버퍼 일괄 적재 (루프 종료 후 1회)
+    logger.info(f"Flushing batch buffers: price={len(price_buf)}, supply={len(supply_buf)}, ratio={len(ratio_buf)}, master={len(master_buf)}")
+    if price_buf:
+        loader.upsert_records("normalized_stock_prices_daily", price_buf)
+    if supply_buf:
+        loader.upsert_records("normalized_stock_supply_daily", supply_buf)
+    if ratio_buf:
+        loader.upsert_records("normalized_stock_fundamentals_ratios", ratio_buf)
+    if master_buf:
+        loader.upsert_records("stocks_master", master_buf)
+
+    # 9. Cleanup
     await KISBaseCollector.close_session()
     loader.insert_log("daily_stock_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
     logger.info("Pipeline Finished Successfully (Corrected Encoding).")

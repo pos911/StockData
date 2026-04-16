@@ -12,12 +12,23 @@ class SupabaseLoader:
         self.key = key
         self.client: Client = create_client(self.url, self.key)
 
-    def upsert_records(self, table_name: str, records: list):
-        if not records: return
+    @staticmethod
+    def _chunked(data: list, size: int):
+        """리스트를 size 단위로 분할하는 제너레이터"""
+        for i in range(0, len(data), size):
+            yield data[i:i + size]
+
+    def upsert_records(self, table_name: str, records: list, chunk_size: int = 1000):
+        """1,000건 단위 청크 분할로 413 Payload Too Large 에러 방지"""
+        if not records:
+            return
+        total = len(records)
+        upserted = 0
         try:
-            # 데이터가 이미 존재할 경우 무시(ignore) 하도록 옵션 추가
-            res = self.client.table(table_name).upsert(records, ignore_duplicates=True).execute()
-            logger.info(f"[{table_name}] Successfully upserted {len(records)} records.")
+            for chunk in self._chunked(records, chunk_size):
+                self.client.table(table_name).upsert(chunk, ignore_duplicates=True).execute()
+                upserted += len(chunk)
+            logger.info(f"[{table_name}] Successfully upserted {upserted}/{total} records.")
         except Exception as e:
             logger.error(f"Failed to upsert records into {table_name}: {e}")
 

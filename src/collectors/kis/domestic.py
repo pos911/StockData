@@ -192,3 +192,32 @@ class KISDomesticStockCollector(KISBaseCollector):
         }
         data = await self._request("GET", "/uapi/domestic-stock/v1/quotations/market-cap", "FHPST01740000", params=params)
         return data.get("output", []) if data else []
+
+    async def fetch_fundamental_info(self, symbol: str, base_date: str, available_at: Optional[str] = None) -> dict:
+        """
+        KIS 주식현재가 기본정보 조회 (TR_ID: FHKST01010100)
+        hts_avls(시가총액), per, pbr, w52_hgpr(52주최고), w52_lwpr(52주최저), lstn_stcn(상장주식수) 추출
+        """
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+        }
+        data = await self._request("GET", "/uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100", params=params)
+        if not data or "output" not in data:
+            return {}
+
+        out = data["output"]
+        record = {
+            "symbol": symbol,
+            "base_date": base_date,
+            "market_cap": _parse_int(out.get("hts_avls", 0)) * 100_000_000,  # 억원 → 원
+            "per": _parse_float(out.get("per", 0)),
+            "pbr": _parse_float(out.get("pbr", 0)),
+            "w52_high": _parse_int(out.get("w52_hgpr", 0)),
+            "w52_low": _parse_int(out.get("w52_lwpr", 0)),
+            "listed_shares": _parse_int(out.get("lstn_stcn", 0)),
+            "source": "KIS",
+            "available_at": available_at or datetime.now().isoformat(),
+        }
+        logger.debug(f"[fetch_fundamental_info] {symbol}: market_cap={record['market_cap']:,}, per={record['per']}, pbr={record['pbr']}")
+        return record

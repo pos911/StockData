@@ -147,7 +147,9 @@ class FeatureGenerator:
         macro_df = self._fetch_table_data("normalized_global_macro_daily", start_date_str, end_date_str)
         if not macro_df.empty:
             macro_df["base_date"] = pd.to_datetime(macro_df["base_date"]).dt.strftime('%Y-%m-%d')
-            macro_df = macro_df.sort_values("base_date")
+            macro_df = macro_df.sort_values("base_date").reset_index(drop=True)
+            # 한/미 휴장일 차이로 발생하는 Null 보정 (Forward-fill)
+            macro_df = macro_df.ffill()
             # 금, 구리, 유성(wti) 컬럼 활용
             if "gold" in macro_df.columns and "copper" in macro_df.columns:
                 macro_df["copper_gold_ratio"] = macro_df["copper"] / macro_df["gold"]
@@ -191,6 +193,9 @@ class FeatureGenerator:
             if not _ms_df.empty and "series_id" in _ms_df.columns:
                 _ms_df["base_date"] = pd.to_datetime(_ms_df["base_date"]).dt.strftime('%Y-%m-%d')
                 _ms_df["value"] = pd.to_numeric(_ms_df["value"], errors="coerce")
+                # 시리즈별로 ffill 적용 (휴장 Null 보정)
+                _ms_df = _ms_df.sort_values(["series_id", "base_date"]).reset_index(drop=True)
+                _ms_df["value"] = _ms_df.groupby("series_id")["value"].ffill()
                 for series_id, feat_prefix in MACRO_MOMENTUM_SERIES.items():
                     _s = _ms_df[_ms_df["series_id"] == series_id].sort_values("base_date")
                     if len(_s) < 2:
