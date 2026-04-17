@@ -61,6 +61,21 @@ class FeatureGenerator:
         df["base_date"] = pd.to_datetime(df["base_date"]).dt.strftime('%Y-%m-%d')
         target_pd_date = end_date_str
 
+        # 비거래일/휴장일 보정: 타겟 날짜 시세가 없으면 직전 영업일로 fallback
+        available_dates = sorted(df["base_date"].dropna().unique().tolist())
+        if target_pd_date not in available_dates:
+            fallback_dates = [d for d in available_dates if d < target_pd_date]
+            if not fallback_dates:
+                logger.error(f"No tradable base_date found on or before {target_pd_date}. Skip feature generation.")
+                return
+            fallback_date = fallback_dates[-1]
+            logger.warning(
+                f"No stock price rows for target_date={target_pd_date}. "
+                f"Falling back to latest tradable date={fallback_date}."
+            )
+            target_pd_date = fallback_date
+            end_date_str = fallback_date
+
         # 로드된 전체 데이터의 날짜 범위를 로그로 출력
         min_date = df["base_date"].min()
         max_date = df["base_date"].max()
