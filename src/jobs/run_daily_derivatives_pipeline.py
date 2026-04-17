@@ -33,8 +33,11 @@ def run_pipeline(target_date: date):
         loader.upsert_records("normalized_derivatives_daily", [record])
         total_processed += 1
 
-    loader.insert_log("daily_derivatives_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
-    logger.info("Derivatives Pipeline Finished.")
+    status = "SUCCESS" if total_processed > 0 else "WARN"
+    if status != "SUCCESS":
+        logger.warning(f"Derivatives Pipeline finished with no processed records for {target_date}.")
+    loader.insert_log("daily_derivatives_pipeline", target_date.strftime("%Y-%m-%d"), status, total_processed)
+    logger.info(f"Derivatives Pipeline Finished. status={status}, processed={total_processed}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
