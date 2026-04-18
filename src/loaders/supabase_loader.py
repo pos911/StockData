@@ -18,15 +18,18 @@ class SupabaseLoader:
         for i in range(0, len(data), size):
             yield data[i:i + size]
 
-    def upsert_records(self, table_name: str, records: list, chunk_size: int = 1000):
-        """1,000건 단위 청크 분할로 413 Payload Too Large 에러 방지"""
+    def upsert_records(self, table_name: str, records: list, chunk_size: int = 1000, ignore_duplicates: bool = False):
+        """
+        1,000건 단위 청크 분할 업서트.
+        기본값은 ignore_duplicates=False 로 설정하여 동일 PK 충돌 시 최신 값으로 갱신합니다.
+        """
         if not records:
             return
         total = len(records)
         upserted = 0
         try:
             for chunk in self._chunked(records, chunk_size):
-                self.client.table(table_name).upsert(chunk, ignore_duplicates=True).execute()
+                self.client.table(table_name).upsert(chunk, ignore_duplicates=ignore_duplicates).execute()
                 upserted += len(chunk)
             logger.info(f"[{table_name}] Successfully upserted {upserted}/{total} records.")
         except Exception as e:
