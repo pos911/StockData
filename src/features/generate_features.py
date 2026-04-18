@@ -21,14 +21,14 @@ class FeatureGenerator:
     def __init__(self, loader: SupabaseLoader):
         self.loader = loader
 
-    def generate_features_for_date(self, target_date: date):
+    def generate_features_for_date(self, target_date: date) -> int:
         # 1. 대상 종목 리스트 (Universe) 가져오기
         universe = self._load_universe()
         enabled_symbols = [s["symbol"] for s in universe]
         
         if not enabled_symbols:
             logger.warning("No enabled symbols found in universe.")
-            return
+            return 0
 
         # 2. 데이터 조회 기간 설정 (최근 60일치 확보)
         start_date = target_date - timedelta(days=90) # 주말/공휴일 고려하여 넉넉히 90일
@@ -46,7 +46,7 @@ class FeatureGenerator:
 
         if prices_df.empty:
             logger.error("Required Price data is missing in Supabase.")
-            return
+            return 0
 
         if supply_df.empty:
             logger.warning("Supply data is empty. Proceeding with price data only.")
@@ -67,7 +67,11 @@ class FeatureGenerator:
             fallback_dates = [d for d in available_dates if d < target_pd_date]
             if not fallback_dates:
                 logger.error(f"No tradable base_date found on or before {target_pd_date}. Skip feature generation.")
+codex/analyze-the-source-code-77xumx
+                return 0
+
                 return
+ main
             fallback_date = fallback_dates[-1]
             logger.warning(
                 f"No stock price rows for target_date={target_pd_date}. "
@@ -290,6 +294,7 @@ class FeatureGenerator:
             logger.info(f"Successfully upserted {record_count} real features for {target_date}.")
         else:
             logger.error(f"ERROR: No features calculated for the given date. Check if input data exists for {target_date}")
+        return record_count
 
     def _fetch_table_data(self, table_name: str, start_date: str, end_date: str) -> pd.DataFrame:
         """Supabase에서 특정 기간의 데이터를 DataFrame으로 로드"""
@@ -327,10 +332,10 @@ def run_job(target_date: date):
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     
     generator = FeatureGenerator(loader)
-    generator.generate_features_for_date(target_date)
-    
-    loader.insert_log("daily_feature_generator", target_date.strftime("%Y-%m-%d"), "SUCCESS", 0)
-    logger.info("Feature Engineering Finished.")
+    processed = generator.generate_features_for_date(target_date)
+    status = "SUCCESS" if processed > 0 else "WARN"
+    loader.insert_log("daily_feature_generator", target_date.strftime("%Y-%m-%d"), status, processed)
+    logger.info(f"Feature Engineering Finished. status={status}, processed={processed}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
