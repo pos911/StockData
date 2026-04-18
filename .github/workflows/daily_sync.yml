@@ -15,10 +15,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
@@ -29,7 +29,7 @@ jobs:
         pip install psycopg2-binary # DB 초기화 등에 필요할 수 있음
 
     - name: Cache KIS token and OpenDart corp codes
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           config/kis_token.json
@@ -48,6 +48,5 @@ jobs:
         python src/jobs/run_daily_macro_pipeline.py
         python src/jobs/run_daily_derivatives_pipeline.py
         python src/jobs/run_daily_stock_pipeline.py
-        python src/jobs/run_daily_derivatives_pipeline.py
         python src/jobs/run_daily_feature_pipeline.py
         python scripts/verify_data.py
