@@ -119,13 +119,63 @@ CREATE TABLE IF NOT EXISTS normalized_stock_supply_daily (
     foreign_net_buy NUMERIC,
     institutional_net_buy NUMERIC,
     individual_net_buy NUMERIC,
+    pension_net_buy NUMERIC,
+    corporate_net_buy NUMERIC,
     foreign_holding_ratio NUMERIC,
-    short_volume NUMERIC,
-    short_balance NUMERIC,
-    lending_balance NUMERIC,
     available_at TIMESTAMP WITH TIME ZONE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol, base_date)
+);
+
+CREATE TABLE IF NOT EXISTS normalized_stock_short_selling (
+    symbol VARCHAR(20),
+    base_date DATE,
+    short_volume NUMERIC,
+    short_value NUMERIC,
+    short_ratio NUMERIC,
+    source VARCHAR(50),
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, base_date)
+);
+
+CREATE TABLE IF NOT EXISTS normalized_stock_fundamentals (
+    symbol VARCHAR(20),
+    base_date DATE,
+    revenue NUMERIC,
+    operating_income NUMERIC,
+    net_income NUMERIC,
+    total_assets NUMERIC,
+    total_liabilities NUMERIC,
+    total_equity NUMERIC,
+    source VARCHAR(50),
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, base_date)
+);
+
+CREATE TABLE IF NOT EXISTS normalized_stock_fundamentals_ratios (
+    symbol VARCHAR(20),
+    base_date DATE,
+    per NUMERIC,
+    pbr NUMERIC,
+    roe NUMERIC,
+    debt_ratio NUMERIC,
+    source VARCHAR(50),
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, base_date)
+);
+
+CREATE TABLE IF NOT EXISTS market_breadth_daily (
+    base_date DATE PRIMARY KEY,
+    advances INT,
+    declines INT,
+    unchanged INT,
+    advancing_volume NUMERIC,
+    declining_volume NUMERIC,
+    available_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS normalized_global_macro_daily (

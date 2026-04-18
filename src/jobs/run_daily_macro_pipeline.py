@@ -28,6 +28,10 @@ def run_pipeline(target_date: date):
     fred = FREDCollector(api_key=config.get("fred", {}).get("api_key", ""))
     te = TradingEconomicsCollector(client_key=config.get("tradingeconomics", {}).get("client_key", ""))
     
+
+    
+    import yfinance as yf
+    
     # 0. 마스터 정보 동기화
     logger.info("Syncing macro master metadata...")
     master_records = []
@@ -55,8 +59,6 @@ def run_pipeline(target_date: date):
         
         if source == "FRED":
             series_id = series.get("series_id")
-            
-            # [최적화] 최근 7일치 데이터만 증분 수집 (과거 전체가 아닌 새로운 값 위주)
             from datetime import timedelta
             obs_start = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
             
@@ -65,12 +67,11 @@ def run_pipeline(target_date: date):
             obs = raw_data.get("observations", []) if raw_data else []
             
             if obs:
-                # Raw 적재 (최근 값 1건만 한다고 가정 시 로직 조정 필요. 본 예제는 단순화)
-                # 실제론 obs 전체 혹은 일부를 raw 테이블에 넣음.
+                # Raw 적재
                 raw_record = {
                     "source": "FRED",
                     "series_id": series_id,
-                    "base_date": target_date.strftime("%Y-%m-%d"), # 가장 최신 기준
+                    "base_date": target_date.strftime("%Y-%m-%d"),
                     "raw_data": json.dumps(raw_data),
                     "collected_at": timestamp_now.isoformat(),
                     "available_at": available_at.isoformat()
@@ -79,6 +80,12 @@ def run_pipeline(target_date: date):
                 
                 # 정규화
                 norm_records = MacroNormalizer.normalize_fred(series_id, obs, available_at)
+                for r in norm_records:
+                    keys_to_remove = [k for k in list(r.keys()) if k not in ['series_id', 'base_date', 'value']]
+                    for k in keys_to_remove:
+                        r.pop(k, None)
+                    if 'value' in r and r['value'] is not None:
+                        r['value'] = float(r['value'])
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
         elif source == "YAHOO":
@@ -141,6 +148,23 @@ def run_pipeline(target_date: date):
                         loader.upsert_records("normalized_macro_series", [norm_record])
                         total_processed += 1
 
+        elif source == "YAHOO":
+            series_id = series.get("series_id")
+            logger.info(f"Fetching YAHOO series: {series_id}")
+            try:
+                from datetime import timedelta
+                df = yf.download(series_id, start=target_date - timedelta(days=5), end=target_date + timedelta(days=1), progress=False)
+                if not df.empty:
+                    norm_record = {
+                        "series_id": series_id,
+                        "base_date": df.index[-1].strftime("%Y-%m-%d"),
+                        "value": float(df["Close"].iloc[-1])
+                    }
+                    loader.upsert_records("normalized_macro_series", [norm_record])
+                    total_processed += 1
+            except Exception as e:
+                logger.error(f"Failed to fetch YAHOO series {series_id}: {e}")
+
     # KRX Market Breadth 수집 (코스피)
     from src.collectors.krx_collector import KRXCollector
     krx = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
@@ -196,8 +220,11 @@ def run_pipeline(target_date: date):
         loader.upsert_records("normalized_global_macro_daily", [global_record])
         total_processed += 1
 
-    loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
-    logger.info("Macro Pipeline Finished.")
+    status = "SUCCESS" if total_processed > 0 else "WARN"
+    if status != "SUCCESS":
+        logger.warning(f"Macro Pipeline finished with no processed records for {target_date}.")
+    loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), status, total_processed)
+    logger.info(f"Macro Pipeline Finished. status={status}, processed={total_processed}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
