@@ -1,4 +1,6 @@
 from typing import Dict, Any, List, Optional
+import json
+from datetime import datetime
 from .base import KISBaseCollector
 from .mapping import KIS_MAPPING
 from src.utils.logger import get_logger
@@ -71,6 +73,22 @@ class KISDomesticStockCollector(KISBaseCollector):
                 "source": "KIS",
                 "available_at": available_at or datetime.now().isoformat()
             })
+            
+        raw_records = []
+        for row in records:
+            base_date = row.get("base_date", "")
+            if len(base_date) == 8 and "-" not in base_date:
+                base_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}"
+            raw_records.append({
+                "source": "KIS",
+                "symbol": symbol,
+                "base_date": base_date,
+                "raw_data": json.dumps(row),
+                "collected_at": datetime.now().isoformat(),
+                "available_at": datetime.now().isoformat()
+            })
+
+        await self.upsert_records("raw_stock_prices_daily", raw_records)
 
         # market_cap Forward-fill: None인 경우 이전 row의 값으로 채우기
         prev_cap = None
@@ -124,6 +142,21 @@ class KISDomesticStockCollector(KISBaseCollector):
                 "available_at": available_at or datetime.now().isoformat()
             })
             
+        raw_records = []
+        for row in records:
+            base_date = row.get("base_date", "")
+            if len(base_date) == 8 and "-" not in base_date:
+                base_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}"
+            raw_records.append({
+                "source": "KIS",
+                "symbol": symbol,
+                "base_date": base_date,
+                "raw_data": json.dumps(row),
+                "collected_at": datetime.now().isoformat(),
+                "available_at": datetime.now().isoformat()
+            })
+
+        await self.upsert_records("raw_stock_supply_daily", raw_records)
         await self.upsert_records("normalized_stock_supply_daily", records)
         return records
 

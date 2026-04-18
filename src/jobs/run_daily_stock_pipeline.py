@@ -139,6 +139,48 @@ async def run_pipeline(target_date: date, limit: int = None):
         name = stock["name"]
         
         try:
+            logger.info(f"Processing {name} ({symbol}) [Sources: {source_cat}]")
+            
+            # 4. stocks_master 업데이트
+            master_data = StockNormalizer.normalize_stock_master(symbol, name, "DYNAMIC")
+            loader.upsert_records("stocks_master", [master_data])
+
+            # 5. KIS 데이터 수집 (Async)
+            kis_ohlcv = await kis_collector.fetch_ohlcv(
+                symbol,
+                timeframe='D',
+                start_date=target_date.strftime("%Y%m%d"),
+                end_date=target_date.strftime("%Y%m%d")
+            )
+            
+            # 6. 수급 데이터 수집 (Async)
+            supply_records = await kis_collector.fetch_investor_trend(symbol)
+
+            # 6-1. KIS 시세 정규화/적재 (fallback: KRX보다 우선)
+            if kis_ohlcv:
+                latest_kis = sorted(kis_ohlcv, key=lambda x: x.get("base_date", ""), reverse=True)[0]
+                normalized_kis_price = {
+                    "symbol": symbol,
+                    "base_date": f"{latest_kis['base_date'][:4]}-{latest_kis['base_date'][4:6]}-{latest_kis['base_date'][6:8]}",
+                    "open_price": float(latest_kis.get("open", 0)),
+                    "high_price": float(latest_kis.get("high", 0)),
+                    "low_price": float(latest_kis.get("low", 0)),
+                    "close_price": float(latest_kis.get("close", 0)),
+                    "volume": float(latest_kis.get("volume", 0)),
+                    "trading_value": float(latest_kis.get("trading_value", 0)),
+                    "market_cap": None,
+                    "outstanding_shares": None,
+                    "available_at": available_at.isoformat()
+                }
+                loader.upsert_records("normalized_stock_prices_daily", [normalized_kis_price])
+
+            # 6-2. KIS 수급 정규화/적재
+            if supply_records:
+                normalized_supply = [
+                    StockNormalizer.normalize_kis_supply(row, symbol, available_at)
+                    for row in supply_records
+                ]
+                loader.upsert_records("normalized_stock_supply_daily", normalized_supply)
             logger.info(f"Processing {name} ({symbol})")
 
             # --- 신규 편입 종목 자동 백필 (배치 버퍼 방식) ---
@@ -258,6 +300,13 @@ async def run_pipeline(target_date: date, limit: int = None):
                         "available_at": timestamp_now.isoformat()
                     })
                 loader.upsert_records("raw_disclosures", news_records)
+
+            # 9. KRX 데이터 수집 (Sync, KIS 미수집 시 fallback)
+            if not kis_ohlcv:
+                raw_data = krx_collector.fetch_daily_ohlcv(symbol, target_date)
+                if raw_data:
+                    norm_data = StockNormalizer.normalize_krx_daily(raw_data, available_at)
+                    loader.upsert_records("normalized_stock_prices_daily", [norm_data])
 
             total_processed += 1
             
