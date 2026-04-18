@@ -4,6 +4,7 @@ import uuid
 import asyncio
 from datetime import date
 import argparse
+import re
 
 from src.utils.logger import get_logger
 from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
@@ -20,6 +21,37 @@ from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 
 logger = get_logger(__name__)
+
+_NON_COMMON_NAME_PATTERNS = [
+    r"ETF", r"ETN", r"인버스", r"레버리지", r"선물", r"액티브", r"머니마켓",
+    r"우$", r"우B$", r"1우$", r"2우$", r"3우$"
+]
+
+def _canonical_symbol_key(symbol: str) -> str:
+    """심볼 중복 제거를 위한 정규화 키 (Q-prefix alias 통합)."""
+    if not symbol:
+        return ""
+    if symbol.startswith("Q") and len(symbol) > 1:
+        return symbol[1:]
+    return symbol
+
+def _prefer_symbol(existing_symbol: str, new_symbol: str) -> str:
+    """
+    동일 canonical key에서 대표 심볼 선택.
+    ETN/특수코드에서 Q-prefix를 우선 사용하여 API 호환성 확보.
+    """
+    if new_symbol and new_symbol.startswith("Q"):
+        return new_symbol
+    return existing_symbol or new_symbol
+
+def _should_fetch_fundamentals(name: str) -> bool:
+    """ETF/ETN/우선주 등 비대상 자산은 fundamentals 수집을 스킵."""
+    if not name:
+        return True
+    for p in _NON_COMMON_NAME_PATTERNS:
+        if re.search(p, name):
+            return False
+    return True
 
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
@@ -38,10 +70,6 @@ async def run_pipeline(target_date: date, limit: int = None):
     universe_loader = DynamicUniverseLoader(config, kis_collector)
     universe = await universe_loader.get_combined_universe()
     
-    if limit:
-        logger.info(f"Limiting execution to first {limit} symbols for verification.")
-        universe = universe[:limit]
-    
     # Legacy Sync Collectors
     krx_auth_key = config.get("krx", {}).get("auth_key", "")
     krx_collector = KRXCollector(auth_key=krx_auth_key)
@@ -59,9 +87,9 @@ async def run_pipeline(target_date: date, limit: int = None):
     try:
         res = loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
         active_stocks = res.data if res.data else []
-        universe_symbols = {u["symbol"] for u in universe}
+        universe_keys = {_canonical_symbol_key(u["symbol"]) for u in universe}
         for s in active_stocks:
-            if s["symbol"] not in universe_symbols:
+            if _canonical_symbol_key(s["symbol"]) not in universe_keys:
                 universe.append({"symbol": s["symbol"], "name": s["name"], "source_category": "active_master"})
                 logger.info(f"Added manual active stock from DB: {s['name']} ({s['symbol']})")
     except Exception as e:
@@ -72,13 +100,22 @@ async def run_pipeline(target_date: date, limit: int = None):
     total_processed = 0
 
     # 유니버스 중복 제거 (symbol 기준)
-    seen_symbols: set = set()
-    dedup_universe = []
+    canonical_map = {}
     for s in universe:
-        if s["symbol"] not in seen_symbols:
-            seen_symbols.add(s["symbol"])
-            dedup_universe.append(s)
-    universe = dedup_universe
+        sym = s["symbol"]
+        key = _canonical_symbol_key(sym)
+        if key not in canonical_map:
+            canonical_map[key] = dict(s)
+        else:
+            chosen_symbol = _prefer_symbol(canonical_map[key].get("symbol"), sym)
+            canonical_map[key]["symbol"] = chosen_symbol
+            # name/source_category는 최초값 유지 (추후 필요 시 병합 가능)
+    universe = list(canonical_map.values())
+
+    if limit:
+        logger.info(f"Limiting execution to first {limit} symbols for verification.")
+        universe = universe[:limit]
+
     logger.info(f"Universe after dedup: {len(universe)} symbols")
 
     # 배치 버퍼 (동적 Flush 포함)
@@ -166,9 +203,13 @@ async def run_pipeline(target_date: date, limit: int = None):
             
             await kis_collector.fetch_investor_trend(symbol, available_at=available_at.isoformat())
             await kis_collector.fetch_short_selling(symbol, available_at=available_at.isoformat())
-            await fundamentals_collector.fetch_valuation_ratios(symbol, available_at=available_at.isoformat())
-            await fundamentals_collector.fetch_financial_statements(symbol, available_at=available_at.isoformat())
-            await fundamentals_collector.fetch_profitability_ratios(symbol, available_at=available_at.isoformat())
+            if _should_fetch_fundamentals(name):
+                _base_date = target_date.strftime("%Y-%m-%d")
+                await fundamentals_collector.fetch_valuation_ratios(symbol, base_date=_base_date, available_at=available_at.isoformat())
+                await fundamentals_collector.fetch_financial_statements(symbol, available_at=available_at.isoformat())
+                await fundamentals_collector.fetch_profitability_ratios(symbol, base_date=_base_date, available_at=available_at.isoformat())
+            else:
+                logger.info(f"Skip fundamentals for non-common asset: {name} ({symbol})")
             
             # 6. OpenDart Disclosures
             corp_code = corp_code_map.get(symbol)

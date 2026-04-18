@@ -48,7 +48,7 @@ class KISFundamentalsCollector(KISBaseCollector):
             await self.upsert_records("normalized_stock_fundamentals", records)
         return records
 
-    async def fetch_valuation_ratios(self, symbol: str, available_at: Optional[str] = None):
+    async def fetch_valuation_ratios(self, symbol: str, base_date: Optional[str] = None, available_at: Optional[str] = None):
         """
         가치평가 및 부채 비율 수집
         TR_ID: FHKST66430600 (안정성), FHKST01010100 (현재가-PER/PBR)
@@ -79,7 +79,7 @@ class KISFundamentalsCollector(KISBaseCollector):
 
         record = {
             "symbol": symbol,
-            "base_date": datetime.now().strftime("%Y-%m-%d"),
+            "base_date": base_date or datetime.now().strftime("%Y-%m-%d"),
             "per": per,
             "pbr": pbr,
             "roe": float(row.get("self_cptl_ntin_inrt", 0) or 0), 
@@ -91,7 +91,7 @@ class KISFundamentalsCollector(KISBaseCollector):
         await self.upsert_records("normalized_stock_fundamentals_ratios", [record])
         return record
 
-    async def fetch_profitability_ratios(self, symbol: str, available_at: Optional[str] = None):
+    async def fetch_profitability_ratios(self, symbol: str, base_date: Optional[str] = None, available_at: Optional[str] = None):
         """
         수익성 비율 (ROE 등) - 단독 호출용 또는 보완용
         """
@@ -112,7 +112,7 @@ class KISFundamentalsCollector(KISBaseCollector):
 
         record = {
             "symbol": symbol,
-            "base_date": datetime.now().strftime("%Y-%m-%d"),
+            "base_date": base_date or datetime.now().strftime("%Y-%m-%d"),
             "roe": float(row.get("self_cptl_ntin_inrt", 0) or 0),
             "source": "KIS",
             "available_at": available_at or datetime.now().isoformat()
