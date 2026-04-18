@@ -89,6 +89,7 @@ class KISDomesticStockCollector(KISBaseCollector):
             })
 
         await self.upsert_records("raw_stock_prices_daily", raw_records)
+<<<<<<< ours
 
         # market_cap Forward-fill: None인 경우 이전 row의 값으로 채우기
         prev_cap = None
@@ -100,6 +101,8 @@ class KISDomesticStockCollector(KISBaseCollector):
                 prev_cap = r["market_cap"]
 
         await self.upsert_records("normalized_stock_prices_daily", records)
+=======
+>>>>>>> theirs
         return records
 
     async def fetch_investor_trend(self, symbol: str, available_at: Optional[str] = None):
@@ -157,7 +160,10 @@ class KISDomesticStockCollector(KISBaseCollector):
             })
 
         await self.upsert_records("raw_stock_supply_daily", raw_records)
+<<<<<<< ours
         await self.upsert_records("normalized_stock_supply_daily", records)
+=======
+>>>>>>> theirs
         return records
 
     async def fetch_short_selling(self, symbol: str, available_at: Optional[str] = None):

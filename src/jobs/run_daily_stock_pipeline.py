@@ -68,8 +68,16 @@ async def run_pipeline(target_date: date, limit: int = None):
 
     universe_loader = DynamicUniverseLoader(config, kis_collector)
     universe = await universe_loader.get_combined_universe()
+<<<<<<< ours
 
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
+=======
+    
+    # 기존 동기 컬렉터들
+    krx_auth_key = config.get("krx", {}).get("auth_key", "")
+    krx_collector = KRXCollector(auth_key=krx_auth_key)
+    
+>>>>>>> theirs
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
     naver_collector = NaverNewsCollector(
         client_id=config.get("naver", {}).get("client_id", ""),
@@ -136,6 +144,7 @@ async def run_pipeline(target_date: date, limit: int = None):
 
         try:
             logger.info(f"Processing {name} ({symbol}) [Sources: {source_cat}]")
+<<<<<<< ours
 
             kis_ohlcv = await kis_collector.fetch_ohlcv(
                 symbol,
@@ -221,6 +230,51 @@ async def run_pipeline(target_date: date, limit: int = None):
             else:
                 logger.info(f"Skip fundamentals for non-common asset: {name} ({symbol})")
 
+=======
+            
+            # 4. stocks_master 업데이트
+            master_data = StockNormalizer.normalize_stock_master(symbol, name, "DYNAMIC")
+            loader.upsert_records("stocks_master", [master_data])
+
+            # 5. KIS 데이터 수집 (Async)
+            kis_ohlcv = await kis_collector.fetch_ohlcv(
+                symbol,
+                timeframe='D',
+                start_date=target_date.strftime("%Y%m%d"),
+                end_date=target_date.strftime("%Y%m%d")
+            )
+            
+            # 6. 수급 데이터 수집 (Async)
+            supply_records = await kis_collector.fetch_investor_trend(symbol)
+
+            # 6-1. KIS 시세 정규화/적재 (fallback: KRX보다 우선)
+            if kis_ohlcv:
+                latest_kis = sorted(kis_ohlcv, key=lambda x: x.get("base_date", ""), reverse=True)[0]
+                normalized_kis_price = {
+                    "symbol": symbol,
+                    "base_date": f"{latest_kis['base_date'][:4]}-{latest_kis['base_date'][4:6]}-{latest_kis['base_date'][6:8]}",
+                    "open_price": float(latest_kis.get("open", 0)),
+                    "high_price": float(latest_kis.get("high", 0)),
+                    "low_price": float(latest_kis.get("low", 0)),
+                    "close_price": float(latest_kis.get("close", 0)),
+                    "volume": float(latest_kis.get("volume", 0)),
+                    "trading_value": float(latest_kis.get("trading_value", 0)),
+                    "market_cap": None,
+                    "outstanding_shares": None,
+                    "available_at": available_at.isoformat()
+                }
+                loader.upsert_records("normalized_stock_prices_daily", [normalized_kis_price])
+
+            # 6-2. KIS 수급 정규화/적재
+            if supply_records:
+                normalized_supply = [
+                    StockNormalizer.normalize_kis_supply(row, symbol, available_at)
+                    for row in supply_records
+                ]
+                loader.upsert_records("normalized_stock_supply_daily", normalized_supply)
+            
+            # 7. OpenDart 공시 수집 및 이벤트 추출
+>>>>>>> theirs
             corp_code = corp_code_map.get(symbol)
             if corp_code:
                 disclosures = opendart_collector.fetch_daily_disclosures(corp_code, target_date.strftime("%Y-%m-%d"))
@@ -269,6 +323,10 @@ async def run_pipeline(target_date: date, limit: int = None):
                 ]
                 loader.upsert_records("raw_disclosures", news_records)
 
+<<<<<<< ours
+=======
+            # 9. KRX 데이터 수집 (Sync, KIS 미수집 시 fallback)
+>>>>>>> theirs
             if not kis_ohlcv:
                 raw_data = krx_collector.fetch_daily_ohlcv(symbol, target_date)
                 if raw_data:
