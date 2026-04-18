@@ -1,4 +1,6 @@
 from typing import Dict, Any, List, Optional
+import json
+from datetime import datetime
 from .base import KISBaseCollector
 from src.utils.logger import get_logger
 
@@ -39,7 +41,21 @@ class KISDomesticStockCollector(KISBaseCollector):
                 "trading_value": int(row.get("acml_tr_pbmn", 0))
             })
             
-        await self.upsert_records("stock_prices_daily", records)
+        raw_records = []
+        for row in records:
+            base_date = row.get("base_date", "")
+            if len(base_date) == 8 and "-" not in base_date:
+                base_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}"
+            raw_records.append({
+                "source": "KIS",
+                "symbol": symbol,
+                "base_date": base_date,
+                "raw_data": json.dumps(row),
+                "collected_at": datetime.now().isoformat(),
+                "available_at": datetime.now().isoformat()
+            })
+
+        await self.upsert_records("raw_stock_prices_daily", raw_records)
         return records
 
     async def fetch_investor_trend(self, symbol: str):
@@ -67,7 +83,21 @@ class KISDomesticStockCollector(KISBaseCollector):
                 "corporate_net_buy": int(row.get("etc_corp_ntby_qty", 0))
             })
             
-        await self.upsert_records("stock_supply_demand", records)
+        raw_records = []
+        for row in records:
+            base_date = row.get("base_date", "")
+            if len(base_date) == 8 and "-" not in base_date:
+                base_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}"
+            raw_records.append({
+                "source": "KIS",
+                "symbol": symbol,
+                "base_date": base_date,
+                "raw_data": json.dumps(row),
+                "collected_at": datetime.now().isoformat(),
+                "available_at": datetime.now().isoformat()
+            })
+
+        await self.upsert_records("raw_stock_supply_daily", raw_records)
         return records
 
     async def fetch_short_selling(self, symbol: str):

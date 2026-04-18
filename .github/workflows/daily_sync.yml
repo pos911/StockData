@@ -43,4 +43,5 @@ jobs:
         export PYTHONPATH=.
         python src/jobs/run_daily_macro_pipeline.py
         python src/jobs/run_daily_stock_pipeline.py
+        python src/jobs/run_daily_derivatives_pipeline.py
         python src/jobs/run_daily_feature_pipeline.py

@@ -76,3 +76,25 @@ class StockNormalizer:
             "is_active": True,
             "updated_at": datetime.now().isoformat()
         }
+
+    @staticmethod
+    def normalize_kis_supply(raw_row: Dict[str, Any], symbol: str, available_at: datetime) -> Dict[str, Any]:
+        """
+        KIS 투자자 수급 응답 1건을 normalized_stock_supply_daily 형식으로 변환
+        """
+        base_date = raw_row.get("base_date", available_at.strftime("%Y%m%d"))
+        if len(base_date) == 8 and "-" not in base_date:
+            base_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}"
+
+        return {
+            "symbol": symbol,
+            "base_date": base_date,
+            "foreign_net_buy": float(raw_row.get("foreign_net_buy", 0)),
+            "institutional_net_buy": float(raw_row.get("institutional_net_buy", 0)),
+            "individual_net_buy": float(raw_row.get("individual_net_buy", 0)),
+            "foreign_holding_ratio": None,
+            "short_volume": None,
+            "short_balance": None,
+            "lending_balance": None,
+            "available_at": available_at.isoformat()
+        }
