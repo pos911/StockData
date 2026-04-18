@@ -204,10 +204,16 @@ async def run_pipeline(target_date: date, limit: int = None):
             await kis_collector.fetch_investor_trend(symbol, available_at=available_at.isoformat())
             await kis_collector.fetch_short_selling(symbol, available_at=available_at.isoformat())
             if _should_fetch_fundamentals(name):
+ codex/analyze-the-source-code-77xumx
                 _base_date = target_date.strftime("%Y-%m-%d")
                 await fundamentals_collector.fetch_valuation_ratios(symbol, base_date=_base_date, available_at=available_at.isoformat())
                 await fundamentals_collector.fetch_financial_statements(symbol, available_at=available_at.isoformat())
                 await fundamentals_collector.fetch_profitability_ratios(symbol, base_date=_base_date, available_at=available_at.isoformat())
+
+                await fundamentals_collector.fetch_valuation_ratios(symbol, available_at=available_at.isoformat())
+                await fundamentals_collector.fetch_financial_statements(symbol, available_at=available_at.isoformat())
+                await fundamentals_collector.fetch_profitability_ratios(symbol, available_at=available_at.isoformat())
+ main
             else:
                 logger.info(f"Skip fundamentals for non-common asset: {name} ({symbol})")
             
