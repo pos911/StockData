@@ -91,7 +91,8 @@ class FeatureGenerator:
         logger.info("Calculating technical and supply features...")
         
         feature_records = []
-        available_at_str = generate_available_at_for_eod(target_date).isoformat()
+        effective_base_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+        available_at_str = generate_available_at_for_eod(effective_base_dt).isoformat()
         
         for symbol, group in df.groupby("symbol"):
             if symbol not in enabled_symbols:
