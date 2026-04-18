@@ -7,12 +7,16 @@ import yfinance as yf
 from src.utils.logger import get_logger
 from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
 from src.collectors.fred_collector import FREDCollector
-from src.collectors.tradingeconomics_collector import TradingEconomicsCollector
 from src.normalizers.macro_normalizer import MacroNormalizer
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 
 logger = get_logger(__name__)
+
+try:
+    from src.collectors.tradingeconomics_collector import TradingEconomicsCollector
+except ImportError:
+    TradingEconomicsCollector = None
 
 
 def load_macro_series():
@@ -28,13 +32,12 @@ def run_pipeline(target_date: date):
 
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     fred = FREDCollector(api_key=config.get("fred", {}).get("api_key", ""))
-    te = TradingEconomicsCollector(client_key=config.get("tradingeconomics", {}).get("client_key", ""))
-<<<<<<< ours
+    te = None
+    if TradingEconomicsCollector is not None:
+        te = TradingEconomicsCollector(client_key=config.get("tradingeconomics", {}).get("client_key", ""))
+    else:
+        logger.warning("TradingEconomics collector is unavailable; TradingEconomics series will be skipped.")
 
-=======
-    
-    # 0. 마스터 정보 동기화
->>>>>>> theirs
     logger.info("Syncing macro master metadata...")
     master_records = [
         {
@@ -85,65 +88,6 @@ def run_pipeline(target_date: date):
                         record["value"] = float(record["value"])
                 loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
-        elif source == "YAHOO":
-            series_id = series.get("series_id")
-            if not series_id:
-                continue
-            try:
-                import yfinance as yf
-                from datetime import timedelta
-                start_dt = target_date - timedelta(days=7)
-                end_dt = target_date + timedelta(days=1)
-                yf_df = yf.download(series_id, start=start_dt, end=end_dt, progress=False)
-                if not yf_df.empty:
-                    close_val = float(yf_df["Close"].iloc[-1])
-                    base_date = yf_df.index[-1].strftime("%Y-%m-%d")
-                    raw_record = {
-                        "source": "YAHOO",
-                        "series_id": series_id,
-                        "base_date": base_date,
-                        "raw_data": json.dumps({"ticker": series_id, "close": close_val}),
-                        "collected_at": timestamp_now.isoformat(),
-                        "available_at": available_at.isoformat()
-                    }
-                    norm_record = {
-                        "series_id": series_id,
-                        "base_date": base_date,
-                        "value": close_val,
-                        "available_at": available_at.isoformat()
-                    }
-                    loader.upsert_records("raw_macro_series", [raw_record])
-                    loader.upsert_records("normalized_macro_series", [norm_record])
-                    total_processed += 1
-            except Exception as e:
-                logger.warning(f"Failed to fetch YAHOO series {series_id}: {e}")
-        elif source == "TradingEconomics":
-            endpoint_key = series.get("endpoint_key", "")
-            if endpoint_key == "south_korea_interest_rate":
-                te_raw = te.fetch_indicator("south korea", "interest rate")
-                if te_raw:
-                    latest = te_raw[0] if isinstance(te_raw, list) else te_raw
-                    value = latest.get("Last") or latest.get("Value")
-                    date_str = latest.get("DateTime") or latest.get("Date")
-                    if value is not None:
-                        base_date = str(date_str)[:10] if date_str else target_date.strftime("%Y-%m-%d")
-                        raw_record = {
-                            "source": "TradingEconomics",
-                            "series_id": endpoint_key,
-                            "base_date": base_date,
-                            "raw_data": json.dumps(te_raw),
-                            "collected_at": timestamp_now.isoformat(),
-                            "available_at": available_at.isoformat()
-                        }
-                        norm_record = {
-                            "series_id": endpoint_key,
-                            "base_date": base_date,
-                            "value": float(value),
-                            "available_at": available_at.isoformat()
-                        }
-                        loader.upsert_records("raw_macro_series", [raw_record])
-                        loader.upsert_records("normalized_macro_series", [norm_record])
-                        total_processed += 1
 
         elif source == "YAHOO":
             series_id = series.get("series_id")
@@ -178,6 +122,10 @@ def run_pipeline(target_date: date):
                 logger.warning(f"Failed to fetch YAHOO series {series_id}: {exc}")
 
         elif source == "TradingEconomics":
+            if te is None:
+                logger.warning("Skipping TradingEconomics series because the collector is unavailable.")
+                continue
+
             endpoint_key = series.get("endpoint_key", "")
             if endpoint_key == "south_korea_interest_rate":
                 te_raw = te.fetch_indicator("south korea", "interest rate")
