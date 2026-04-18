@@ -67,11 +67,7 @@ class FeatureGenerator:
             fallback_dates = [d for d in available_dates if d < target_pd_date]
             if not fallback_dates:
                 logger.error(f"No tradable base_date found on or before {target_pd_date}. Skip feature generation.")
-codex/analyze-the-source-code-77xumx
                 return 0
-
-                return
- main
             fallback_date = fallback_dates[-1]
             logger.warning(
                 f"No stock price rows for target_date={target_pd_date}. "
