@@ -1,4 +1,5 @@
 import json
+import re
 from typing import List, Dict, Any, Optional
 from supabase import create_client, Client
 from src.utils.logger import get_logger
@@ -52,6 +53,15 @@ class SupabaseLoader:
             deduped[key] = record
         return list(deduped.values()) + passthrough
 
+    @staticmethod
+    def _missing_schema_column(error: Exception) -> Optional[str]:
+        match = re.search(r"Could not find the '([^']+)' column", str(error))
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _without_column(records: list, column: str) -> list:
+        return [{key: value for key, value in record.items() if key != column} for record in records]
+
     def upsert_records(
         self,
         table_name: str,
@@ -86,6 +96,20 @@ class SupabaseLoader:
             logger.info(f"[{table_name}] Successfully upserted {upserted}/{total} records.")
             return True
         except Exception as e:
+            missing_column = self._missing_schema_column(e)
+            if missing_column and any(missing_column in record for record in records):
+                logger.warning(
+                    f"[{table_name}] Column '{missing_column}' is missing in schema cache. "
+                    "Retrying upsert without that column."
+                )
+                return self.upsert_records(
+                    table_name=table_name,
+                    records=self._without_column(records, missing_column),
+                    chunk_size=chunk_size,
+                    ignore_duplicates=ignore_duplicates,
+                    on_conflict=on_conflict,
+                    raise_on_error=raise_on_error,
+                )
             logger.error(f"Failed to upsert records into {table_name}: {e}")
             if raise_on_error:
                 raise

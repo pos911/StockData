@@ -6,18 +6,6 @@
     "enabled": true
   },
   {
-    "symbol": "222800",
-    "name": "심텍",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "000720",
-    "name": "현대건설",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
     "symbol": "063080",
     "name": "컴투스홀딩스",
     "market": "KOSDAQ",
@@ -44,6 +32,24 @@
   {
     "symbol": "278470",
     "name": "에이피알",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "069960",
+    "name": "현대백화점",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "035420",
+    "name": "NAVER",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "015760",
+    "name": "한국전력",
     "market": "KOSPI",
     "enabled": true
   }
