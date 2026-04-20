@@ -2,6 +2,7 @@ import json
 import argparse
 from datetime import date, timedelta
 
+import pandas as pd
 import yfinance as yf
 
 from src.utils.logger import get_logger
@@ -22,6 +23,63 @@ except ImportError:
 def load_macro_series():
     with open("config/macro_series.json", "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def compute_market_breadth_from_prices(loader: SupabaseLoader, target_date: date):
+    start_date = (target_date - timedelta(days=10)).strftime("%Y-%m-%d")
+    end_date = target_date.strftime("%Y-%m-%d")
+    rows = loader.fetch_all(
+        table_name="normalized_stock_prices_daily",
+        date_col="base_date",
+        start_date=start_date,
+        end_date=end_date,
+        order_col="base_date",
+        desc=False,
+    )
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    if df.empty or not {"symbol", "base_date", "close_price"}.issubset(df.columns):
+        return None
+
+    df["base_date"] = pd.to_datetime(df["base_date"]).dt.strftime("%Y-%m-%d")
+    df["close_price"] = pd.to_numeric(df["close_price"], errors="coerce")
+    df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
+    latest_date = df["base_date"].max()
+
+    advances = declines = unchanged = 0
+    advancing_volume = declining_volume = 0
+    for _, group in df.dropna(subset=["close_price"]).sort_values("base_date").groupby("symbol"):
+        latest_rows = group[group["base_date"] == latest_date]
+        previous_rows = group[group["base_date"] < latest_date]
+        if latest_rows.empty or previous_rows.empty:
+            continue
+
+        latest = latest_rows.iloc[-1]
+        previous = previous_rows.iloc[-1]
+        diff = float(latest["close_price"]) - float(previous["close_price"])
+        volume = int(float(latest.get("volume") or 0))
+        if diff > 0:
+            advances += 1
+            advancing_volume += volume
+        elif diff < 0:
+            declines += 1
+            declining_volume += volume
+        else:
+            unchanged += 1
+
+    if advances + declines + unchanged == 0:
+        return None
+
+    return {
+        "base_date": latest_date,
+        "advances": advances,
+        "declines": declines,
+        "unchanged": unchanged,
+        "advancing_volume": advancing_volume,
+        "declining_volume": declining_volume,
+    }
 
 
 def run_pipeline(target_date: date):
@@ -157,6 +215,8 @@ def run_pipeline(target_date: date):
 
     krx = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
     breadth_data = krx.fetch_market_breadth(target_date)
+    if not breadth_data:
+        breadth_data = compute_market_breadth_from_prices(loader, target_date)
 
     from src.collectors.global_index_collector import GlobalIndexCollector
 
@@ -207,7 +267,7 @@ def run_pipeline(target_date: date):
 
         if breadth_data:
             breadth_record = {
-                "base_date": target_date.strftime("%Y-%m-%d"),
+                "base_date": breadth_data.get("base_date") or target_date.strftime("%Y-%m-%d"),
                 **breadth_data,
                 "available_at": available_at.isoformat(),
             }

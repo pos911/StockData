@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, Any, Optional, List
 import pandas as pd
 import requests
@@ -48,8 +48,12 @@ class KRXCollector:
         KRX OPEN API '전종목 시세' 엔드포인트를 호출하여 Market Breadth 수치를 산출합니다.
         승인 대기 중(404, 403 등)일 경우 에러 대신 경고 로그만 남기고 None을 리턴합니다.
         """
+        fallback = self._fetch_market_breadth_pykrx(target_date)
+        if fallback:
+            return fallback
+
         if not self.auth_key:
-            logger.warning("KRX auth_key is missing. Skipping market breadth.")
+            logger.warning("KRX auth_key is missing and pykrx fallback failed. Skipping market breadth.")
             return None
 
         try:
@@ -91,7 +95,7 @@ class KRXCollector:
             unchanged_df = df[df["FLUC_RT"] == 0]
             
             return {
-                "base_date": target_date.strftime("%Y%m%d"),
+                "base_date": target_date.strftime("%Y-%m-%d"),
                 "advances": int(len(advances_df)),
                 "declines": int(len(declines_df)),
                 "unchanged": int(len(unchanged_df)),
@@ -101,4 +105,49 @@ class KRXCollector:
             
         except Exception as e:
             logger.warning(f"KRX API pending approval or error: {e}. Skipping.")
+            return None
+
+    def _fetch_market_breadth_pykrx(self, target_date: date) -> Optional[Dict[str, Any]]:
+        try:
+            from pykrx import stock
+
+            for offset in range(0, 7):
+                query_date = target_date - timedelta(days=offset)
+                frames = []
+                for market in ("KOSPI", "KOSDAQ"):
+                    df = stock.get_market_ohlcv_by_ticker(query_date.strftime("%Y%m%d"), market=market)
+                    if df is not None and not df.empty:
+                        frames.append(df)
+
+                if not frames:
+                    continue
+
+                df_all = pd.concat(frames)
+                change_col = "등락률" if "등락률" in df_all.columns else None
+                volume_col = "거래량" if "거래량" in df_all.columns else None
+                if not change_col:
+                    logger.warning(f"pykrx market breadth missing change-rate column: {list(df_all.columns)}")
+                    return None
+
+                change = pd.to_numeric(df_all[change_col], errors="coerce").fillna(0)
+                volume = (
+                    pd.to_numeric(df_all[volume_col], errors="coerce").fillna(0)
+                    if volume_col
+                    else pd.Series(0, index=df_all.index)
+                )
+
+                advances = change > 0
+                declines = change < 0
+                unchanged = change == 0
+                return {
+                    "base_date": query_date.strftime("%Y-%m-%d"),
+                    "advances": int(advances.sum()),
+                    "declines": int(declines.sum()),
+                    "unchanged": int(unchanged.sum()),
+                    "advancing_volume": int(volume[advances].sum()),
+                    "declining_volume": int(volume[declines].sum()),
+                }
+            return None
+        except Exception as exc:
+            logger.warning(f"pykrx market breadth fallback failed: {exc}")
             return None

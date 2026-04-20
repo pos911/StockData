@@ -1,72 +1,112 @@
 import logging
-from datetime import date
-from typing import Dict, Any, Optional
-from pykrx import stock
-import FinanceDataReader as fdr
+from datetime import date, timedelta
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+
 class DerivativesCollector:
-    """파생상품 데이터 수집기 (KOSPI200 지수 및 시장 정보)"""
-    def __init__(self):
-        pass
+    """Collect KOSPI200 proxy data for the derivatives daily table."""
+
+    KOSPI200_INDEX_CODE = "1028"
 
     def fetch_daily_derivatives(self, target_date: date) -> Optional[Dict[str, Any]]:
-        """
-        KOSPI200 지수 및 시장 미결제약정(또는 거래대금) 데이터 수집
-        """
-        target_dt_str = target_date.strftime("%Y%m%d")
-        logger.info(f"Fetching actual Derivatives data for {target_dt_str}...")
-        
+        yf_record = self._fetch_kospi200_from_yfinance(target_date)
+        if yf_record:
+            return yf_record
+
+        for offset in range(0, 7):
+            query_date = target_date - timedelta(days=offset)
+            record = self._fetch_kospi200_from_pykrx(query_date)
+            if record:
+                return record
+
+        logger.warning(f"No KOSPI200 derivatives proxy data found on or before {target_date}.")
+        return None
+
+    def _fetch_kospi200_from_yfinance(self, target_date: date) -> Optional[Dict[str, Any]]:
         try:
-            # 1. KOSPI 200 지수 (Spot) 조회
-            df_index = stock.get_index_ohlcv_by_date(target_dt_str, target_dt_str, "101")
+            import yfinance as yf
 
-            if df_index.empty:
-                logger.warning(f"No index data found for {target_dt_str}")
+            start_dt = target_date - timedelta(days=7)
+            end_dt = target_date + timedelta(days=1)
+            df = yf.download("^KS200", start=start_dt, end=end_dt, progress=False, auto_adjust=False)
+            if df is None or df.empty or "Close" not in df:
                 return None
 
-            row0 = df_index.iloc[0]
-            # KRX 컬럼명이 변경될 수 있으므로 동적으로 조회
-            cols = list(df_index.columns)
-            logger.debug(f"KRX index columns: {cols}")
+            close = df["Close"]
+            volume = df["Volume"] if "Volume" in df else None
+            if hasattr(close, "columns"):
+                close = close.iloc[:, 0]
+            if hasattr(volume, "columns"):
+                volume = volume.iloc[:, 0]
 
-            # 종가 컬럼 탐색 ('종가' 혹은 첫 번째 수치 컬럼 fallback)
-            close_col = "종가" if "종가" in cols else next((c for c in cols if "가" in c), cols[0])
-            volume_col = "거래량" if "거래량" in cols else next((c for c in cols if "량" in c), None)
-
-            try:
-                kospi200_spot = float(row0[close_col])
-            except (KeyError, TypeError, ValueError) as e:
-                logger.error(f"Failed to read KOSPI200 close price: {e}. Columns: {cols}")
+            close = close.dropna()
+            if close.empty:
                 return None
 
-            kospi200_futures = kospi200_spot
-            futures_basis = 0.0
-            open_interest = int(row0[volume_col]) if volume_col and volume_col in cols else 0
+            target_str = target_date.strftime("%Y-%m-%d")
+            index_dates = list(close.index.strftime("%Y-%m-%d"))
+            position = index_dates.index(target_str) if target_str in index_dates else len(close) - 1
+            base_date = close.index[position].date()
+            volume_value = 0
+            if volume is not None and position < len(volume):
+                try:
+                    volume_value = int(float(volume.iloc[position]))
+                except (TypeError, ValueError):
+                    volume_value = 0
+
+            return {
+                "base_date": base_date.strftime("%Y-%m-%d"),
+                "kospi200_futures": float(close.iloc[position]),
+                "futures_basis": 0.0,
+                "open_interest": volume_value,
+                "night_futures_return": 0.0,
+                "expiration_flag": self._is_expiration_date(base_date),
+            }
+        except Exception as exc:
+            logger.warning(f"Failed to fetch KOSPI200 proxy via yfinance: {exc}")
+            return None
+
+    def _fetch_kospi200_from_pykrx(self, target_date: date) -> Optional[Dict[str, Any]]:
+        try:
+            from pykrx import stock
+
+            target = target_date.strftime("%Y%m%d")
+            df = stock.get_index_ohlcv_by_date(target, target, self.KOSPI200_INDEX_CODE)
+            if df is None or df.empty:
+                return None
+
+            row = df.iloc[-1]
+            close = self._row_number(row, ["종가", "현재가"])
+            volume = self._row_number(row, ["거래량"])
+            if close is None:
+                logger.warning(f"KOSPI200 close column missing for {target}. Columns={list(df.columns)}")
+                return None
 
             return {
                 "base_date": target_date.strftime("%Y-%m-%d"),
-                "kospi200_futures": kospi200_futures,
-                "futures_basis": futures_basis,
-                "open_interest": open_interest,
+                "kospi200_futures": close,
+                "futures_basis": 0.0,
+                "open_interest": int(volume or 0),
                 "night_futures_return": 0.0,
-                "expiration_flag": self._is_expiration_date(target_date)
+                "expiration_flag": self._is_expiration_date(target_date),
             }
-        except (ValueError, KeyError) as e:
-            logger.error(f"Derivatives data parsing error: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching derivatives data: {e}")
+        except Exception as exc:
+            logger.warning(f"Failed to fetch KOSPI200 proxy for {target_date}: {exc}")
             return None
 
-    def _is_expiration_date(self, target_date: date) -> bool:
-        """선물/옵션 만기일 여부 판정 (간단 로직: 매월 2번째 목요일 등)"""
-        # 3, 6, 9, 12월의 2번째 목요일은 선물/옵션 동시 만기일
-        if target_date.weekday() != 3: # Thursday
-            return False
-            
-        # 해당 월의 8일~14일 사이의 목요일이 2번째 목요일
-        if 8 <= target_date.day <= 14:
-            return True
-        return False
+    @staticmethod
+    def _row_number(row, column_names):
+        for column in column_names:
+            if column in row.index:
+                try:
+                    return float(row[column])
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _is_expiration_date(target_date: date) -> bool:
+        # Korean index futures/options usually expire on the second Thursday.
+        return target_date.weekday() == 3 and 8 <= target_date.day <= 14
