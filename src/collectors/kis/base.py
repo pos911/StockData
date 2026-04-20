@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import time
+from functools import partial
 from typing import Dict, Any, List, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from src.utils.logger import get_logger
@@ -130,11 +131,29 @@ class KISBaseCollector:
                     logger.error(f"KIS API Error [{resp.status}] for {tr_id} at {url}: {text}")
                     return None
 
-    async def upsert_records(self, table_name: str, records: List[Dict[str, Any]]):
+    async def upsert_records(
+        self,
+        table_name: str,
+        records: List[Dict[str, Any]],
+        ignore_duplicates: bool = False,
+        on_conflict: Optional[str] = None,
+        raise_on_error: bool = False,
+    ):
         """데이터 적재 (Sync 로더를 ThreadPool에서 비동기로 실행)"""
         if not records: return
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self.db_loader.upsert_records, table_name, records)
+            upsert = partial(
+                self.db_loader.upsert_records,
+                table_name,
+                records,
+                ignore_duplicates=ignore_duplicates,
+                on_conflict=on_conflict,
+                raise_on_error=raise_on_error,
+            )
+            return await loop.run_in_executor(None, upsert)
         except Exception as e:
             logger.error(f"Supabase upsert failure in {table_name}: {e}")
+            if raise_on_error:
+                raise
+            return False

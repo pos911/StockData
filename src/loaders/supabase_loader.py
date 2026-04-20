@@ -1,9 +1,28 @@
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from supabase import create_client, Client
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+TABLE_CONFLICT_KEYS = {
+    "raw_stock_prices_daily": ["source", "symbol", "base_date"],
+    "raw_stock_supply_daily": ["source", "symbol", "base_date"],
+    "raw_macro_series": ["source", "series_id", "base_date"],
+    "normalized_stock_prices_daily": ["symbol", "base_date"],
+    "normalized_stock_supply_daily": ["symbol", "base_date"],
+    "normalized_stock_short_selling": ["symbol", "base_date"],
+    "normalized_stock_fundamentals": ["symbol", "base_date"],
+    "normalized_stock_fundamentals_ratios": ["symbol", "base_date"],
+    "normalized_stock_events_daily": ["symbol", "base_date", "event_type"],
+    "normalized_macro_series": ["series_id", "base_date"],
+    "normalized_global_macro_daily": ["base_date"],
+    "market_breadth_daily": ["base_date"],
+    "normalized_derivatives_daily": ["base_date"],
+    "feature_store_daily": ["symbol", "base_date", "feature_name"],
+    "stocks_master": ["symbol"],
+    "macro_series_master": ["series_id"],
+}
 
 class SupabaseLoader:
     """Supabase DB 데이터 적재기 (아이뎀포턴시 중점)"""
@@ -18,22 +37,59 @@ class SupabaseLoader:
         for i in range(0, len(data), size):
             yield data[i:i + size]
 
-    def upsert_records(self, table_name: str, records: list, chunk_size: int = 1000, ignore_duplicates: bool = False):
+    @staticmethod
+    def _deduplicate(records: list, key_fields: Optional[List[str]]) -> list:
+        if not key_fields:
+            return records
+
+        deduped = {}
+        passthrough = []
+        for record in records:
+            if any(record.get(field) in (None, "") for field in key_fields):
+                passthrough.append(record)
+                continue
+            key = tuple(record.get(field) for field in key_fields)
+            deduped[key] = record
+        return list(deduped.values()) + passthrough
+
+    def upsert_records(
+        self,
+        table_name: str,
+        records: list,
+        chunk_size: int = 1000,
+        ignore_duplicates: bool = False,
+        on_conflict: Optional[str] = None,
+        raise_on_error: bool = False,
+    ) -> bool:
         """
         1,000건 단위 청크 분할 업서트.
         기본값은 ignore_duplicates=False 로 설정하여 동일 PK 충돌 시 최신 값으로 갱신합니다.
         """
         if not records:
-            return
+            return True
+
+        conflict_keys = TABLE_CONFLICT_KEYS.get(table_name)
+        if on_conflict is None and conflict_keys:
+            on_conflict = ",".join(conflict_keys)
+
+        records = self._deduplicate(records, conflict_keys)
         total = len(records)
         upserted = 0
         try:
             for chunk in self._chunked(records, chunk_size):
-                self.client.table(table_name).upsert(chunk, ignore_duplicates=ignore_duplicates).execute()
+                upsert_kwargs = {"ignore_duplicates": ignore_duplicates}
+                if on_conflict:
+                    upsert_kwargs["on_conflict"] = on_conflict
+                query = self.client.table(table_name).upsert(chunk, **upsert_kwargs)
+                query.execute()
                 upserted += len(chunk)
             logger.info(f"[{table_name}] Successfully upserted {upserted}/{total} records.")
+            return True
         except Exception as e:
             logger.error(f"Failed to upsert records into {table_name}: {e}")
+            if raise_on_error:
+                raise
+            return False
 
     def insert_log(self, job_name: str, target_date: str, status: str, records_processed: int, error_message: str = ""):
         """파이프라인 실행 로그 기록"""

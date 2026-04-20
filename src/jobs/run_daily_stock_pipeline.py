@@ -54,6 +54,11 @@ def _should_fetch_fundamentals(name: str) -> bool:
     return not any(re.search(pattern, name) for pattern in _NON_COMMON_NAME_PATTERNS)
 
 
+def _to_ratio_record(record: dict) -> dict:
+    allowed_keys = {"symbol", "base_date", "per", "pbr", "roe", "debt_ratio", "source", "available_at"}
+    return {key: value for key, value in record.items() if key in allowed_keys}
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -186,7 +191,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                         available_at=available_at.isoformat(),
                     )
                     if bf_ratio:
-                        ratio_buf.append(bf_ratio)
+                        ratio_buf.append(_to_ratio_record(bf_ratio))
                     await asyncio.sleep(0.2)
 
                     logger.info(f"[Backfill] {symbol} buffered.")

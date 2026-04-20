@@ -21,6 +21,19 @@ class FeatureGenerator:
     def __init__(self, loader: SupabaseLoader):
         self.loader = loader
 
+    @staticmethod
+    def _deduplicate_feature_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped = {}
+        for record in records:
+            key = (record.get("symbol"), record.get("base_date"), record.get("feature_name"))
+            if any(value in (None, "") for value in key):
+                continue
+            value = record.get("feature_value")
+            if value is None or not np.isfinite(value):
+                continue
+            deduped[key] = record
+        return list(deduped.values())
+
     def generate_features_for_date(self, target_date: date) -> int:
         # 1. 대상 종목 리스트 (Universe) 가져오기
         universe = self._load_universe()
@@ -283,11 +296,18 @@ class FeatureGenerator:
 
         # 6. Feature Store 저장
         # 요구사항 3: 강제 확인 로직
+        original_count = len(feature_records)
+        feature_records = self._deduplicate_feature_records(feature_records)
         record_count = len(feature_records)
+        if record_count != original_count:
+            logger.warning(f"Deduplicated feature records before upsert: {original_count} -> {record_count}")
         logger.info(f"Target count to upsert: {record_count}")
         
         if record_count > 0:
-            self.loader.upsert_records("feature_store_daily", feature_records)
+            success = self.loader.upsert_records("feature_store_daily", feature_records)
+            if not success:
+                logger.error(f"Feature upsert failed for {target_date}.")
+                return 0
             logger.info(f"Successfully upserted {record_count} real features for {target_date}.")
         else:
             logger.error(f"ERROR: No features calculated for the given date. Check if input data exists for {target_date}")
