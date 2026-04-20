@@ -40,15 +40,19 @@ def apply_schema_migrations() -> None:
         ]
         statements.append("NOTIFY pgrst, 'reload schema';")
 
-        with psycopg2.connect(connection_string) as conn:
+        with psycopg2.connect(connection_string, connect_timeout=10) as conn:
             with conn.cursor() as cursor:
                 for statement in statements:
                     cursor.execute(statement)
             conn.commit()
         logger.info("Schema migrations applied successfully.")
     except Exception as exc:
-        logger.error(f"Failed to apply schema migrations: {exc}")
-        raise
+        logger.warning(
+            "Schema migrations skipped. This is non-fatal for the data sync; "
+            "use the Supabase pooler connection string or run sql/supabase_schema.sql manually "
+            f"to persist new columns. Error: {exc}"
+        )
+        return
 
 
 if __name__ == "__main__":

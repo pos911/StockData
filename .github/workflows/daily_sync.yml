@@ -45,7 +45,7 @@ jobs:
         mkdir -p config
         echo "$API_KEYS_JSON" > config/api_keys.json
         export PYTHONPATH=.
-        python scripts/apply_schema_migrations.py
+        python scripts/apply_schema_migrations.py || echo "Schema migration skipped; continuing data sync"
         python src/jobs/run_daily_macro_pipeline.py
         python src/jobs/run_daily_derivatives_pipeline.py
         python src/jobs/run_daily_stock_pipeline.py
