@@ -26,6 +26,28 @@ class DynamicUniverseLoader:
         supabase_key = config.get("supabase", {}).get("service_role_key", "")
         self.loader = SupabaseLoader(url=supabase_url, key=supabase_key)
 
+    def _load_static_universe(self) -> List[Dict[str, str]]:
+        if not os.path.exists(self.static_universe_path):
+            logger.warning(f"Static universe file is missing: {self.static_universe_path}")
+            return []
+
+        try:
+            with open(self.static_universe_path, "r", encoding="utf-8") as file:
+                items = json.load(file)
+        except Exception as exc:
+            logger.error(f"Failed to read static universe file: {exc}")
+            return []
+
+        results = []
+        for item in items:
+            if not item.get("enabled", True):
+                continue
+            symbol = item.get("symbol")
+            name = item.get("name")
+            if symbol and name:
+                results.append({"code": symbol, "name": name})
+        return results
+
     async def get_combined_universe(self) -> List[Dict[str, Any]]:
         """
         모든 카테고리의 종목을 수집하여 통합된 리스트를 반환합니다.
@@ -114,15 +136,20 @@ class DynamicUniverseLoader:
             await asyncio.sleep(0.5)
 
     async def _load_category_0(self) -> List[Dict[str, str]]:
-        """Category 0 (Master Active): stocks_master 테이블에서 is_active=true인 종목 조회"""
+        combined = {}
+
+        for item in self._load_static_universe():
+            combined[item["code"]] = item["name"]
+
         try:
             res = self.loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
             if res.data:
-                return [{"code": s["symbol"], "name": s["name"]} for s in res.data]
-            return []
+                for stock in res.data:
+                    combined.setdefault(stock["symbol"], stock["name"])
         except Exception as e:
             logger.error(f"Category 0 loading error (stocks_master): {e}")
-            return []
+
+        return [{"code": code, "name": name} for code, name in combined.items()]
 
     async def _load_category_1(self) -> List[Dict[str, str]]:
         """Category 1 (KOSPI Vol Top 30)"""
