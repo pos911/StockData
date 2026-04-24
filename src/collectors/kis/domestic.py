@@ -9,6 +9,14 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+_INVESTOR_REQUIRED_KEYS = {
+    "stck_bsop_date",
+    "prsn_ntby_qty",
+    "orgn_ntby_qty",
+    "frgn_ntby_qty",
+}
+
+
 def _parse_int(value) -> int:
     if value is None or value == "":
         return 0
@@ -28,6 +36,53 @@ def _parse_float(value) -> float:
 
 
 class KISDomesticStockCollector(KISBaseCollector):
+    @staticmethod
+    def _all_zero_investor_flow(records) -> bool:
+        if not records:
+            return False
+        return all(
+            record["individual_net_buy"] == 0
+            and record["institutional_net_buy"] == 0
+            and record["foreign_net_buy"] == 0
+            and record["pension_net_buy"] == 0
+            and record["corporate_net_buy"] == 0
+            for record in records
+        )
+
+    @staticmethod
+    def _investor_keys_present(rows) -> bool:
+        if not rows:
+            return False
+        row_keys = set(rows[0].keys())
+        return _INVESTOR_REQUIRED_KEYS.issubset(row_keys)
+
+    async def _fetch_investor_payload(self, symbol: str):
+        mapping = KIS_MAPPING["investor_trend"]
+        attempts = []
+
+        for market_div_code in ("J", "Q"):
+            params = {
+                "FID_COND_MRKT_DIV_CODE": market_div_code,
+                "FID_INPUT_ISCD": symbol,
+            }
+            data = await self._request("GET", mapping["path"], mapping["tr_id"], params=params)
+            rows = data.get("output", []) if data else []
+            attempts.append((market_div_code, rows))
+
+            if rows and self._investor_keys_present(rows):
+                if market_div_code == "Q":
+                    logger.info(f"Investor trend for {symbol} succeeded with KOSDAQ market code fallback.")
+                return market_div_code, rows
+
+        for market_div_code, rows in attempts:
+            if rows:
+                sample_keys = sorted(rows[0].keys())
+                logger.error(
+                    f"KIS investor trend response for {symbol} with market code {market_div_code} "
+                    f"is missing expected keys. sample_keys={sample_keys}"
+                )
+        return None, []
+
     async def fetch_ohlcv(
         self,
         symbol: str,
@@ -94,17 +149,15 @@ class KISDomesticStockCollector(KISBaseCollector):
         return records
 
     async def fetch_investor_trend(self, symbol: str, available_at: Optional[str] = None):
-        mapping = KIS_MAPPING["investor_trend"]
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": symbol,
-        }
-        data = await self._request("GET", mapping["path"], mapping["tr_id"], params=params)
-        if not data or "output" not in data:
+        market_div_code, rows = await self._fetch_investor_payload(symbol)
+        if not rows:
             return []
 
         records = []
-        for row in data["output"]:
+        raw_records = []
+        now_iso = datetime.now().isoformat()
+
+        for row in rows:
             base_date = row.get("stck_bsop_date")
             formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}" if base_date else ""
 
@@ -127,21 +180,34 @@ class KISDomesticStockCollector(KISBaseCollector):
                     "pension_net_buy": pension,
                     "corporate_net_buy": corporate,
                     "source": "KIS",
-                    "available_at": available_at or datetime.now().isoformat(),
+                    "available_at": available_at or now_iso,
+                }
+            )
+            raw_records.append(
+                {
+                "source": "KIS",
+                    "symbol": symbol,
+                    "base_date": formatted_date,
+                    "raw_data": json.dumps(
+                        {
+                            "market_div_code": market_div_code,
+                            "response_row": row,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "collected_at": now_iso,
+                    "available_at": available_at or now_iso,
                 }
             )
 
-        raw_records = [
-            {
-                "source": "KIS",
-                "symbol": symbol,
-                "base_date": record["base_date"],
-                "raw_data": json.dumps(record),
-                "collected_at": datetime.now().isoformat(),
-                "available_at": datetime.now().isoformat(),
-            }
-            for record in records
-        ]
+        if self._all_zero_investor_flow(records):
+            sample_keys = sorted(rows[0].keys()) if rows else []
+            logger.error(
+                f"KIS investor trend returned only zero values for {symbol}. "
+                f"market_div_code={market_div_code}, sample_keys={sample_keys}"
+            )
+            await self.upsert_records("raw_stock_supply_daily", raw_records)
+            return []
 
         await self.upsert_records("raw_stock_supply_daily", raw_records)
         await self.upsert_records("normalized_stock_supply_daily", records)
