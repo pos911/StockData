@@ -319,6 +319,7 @@ async def run_pipeline(target_date: date, limit: int = None):
         except Exception as exc:
             logger.warning(f"Watch check failed for {table_name}: {exc}")
 
+    await auth_mgr.shutdown()
     await KISBaseCollector.close_session()
     loader.insert_log("daily_stock_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
     logger.info("Pipeline Finished Successfully.")

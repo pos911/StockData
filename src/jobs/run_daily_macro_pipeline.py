@@ -111,6 +111,7 @@ def run_pipeline(target_date: date):
     available_at = generate_available_at_for_eod(target_date)
     timestamp_now = get_current_kst()
     total_processed = 0
+    encountered_error = False
 
     for series in series_list:
         if not series.get("enabled", False):
@@ -157,7 +158,10 @@ def run_pipeline(target_date: date):
                 end_dt = target_date + timedelta(days=1)
                 yf_df = yf.download(series_id, start=start_dt, end=end_dt, progress=False)
                 if not yf_df.empty:
-                    close_val = float(yf_df["Close"].iloc[-1])
+                    close_series = yf_df["Close"]
+                    if hasattr(close_series, "columns"):
+                        close_series = close_series.iloc[:, 0]
+                    close_val = float(close_series.iloc[-1])
                     base_date = yf_df.index[-1].strftime("%Y-%m-%d")
                     raw_record = {
                         "source": "YAHOO",
@@ -271,15 +275,19 @@ def run_pipeline(target_date: date):
                 **breadth_data,
                 "available_at": available_at.isoformat(),
             }
-            loader.upsert_records("market_breadth_daily", [breadth_record])
+            if loader.upsert_records("market_breadth_daily", [breadth_record]):
+                total_processed += 1
+            else:
+                encountered_error = True
+
+        if loader.upsert_records("normalized_global_macro_daily", [global_record]):
             total_processed += 1
+        else:
+            encountered_error = True
 
-        loader.upsert_records("normalized_global_macro_daily", [global_record])
-        total_processed += 1
-
-    status = "SUCCESS" if total_processed > 0 else "WARN"
+    status = "SUCCESS" if total_processed > 0 and not encountered_error else "WARN"
     if status != "SUCCESS":
-        logger.warning(f"Macro Pipeline finished with no processed records for {target_date}.")
+        logger.warning(f"Macro Pipeline finished with warnings for {target_date}. processed={total_processed}")
     loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), status, total_processed)
     logger.info(f"Macro Pipeline Finished. status={status}, processed={total_processed}")
 

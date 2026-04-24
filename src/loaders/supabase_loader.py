@@ -25,6 +25,10 @@ TABLE_CONFLICT_KEYS = {
     "macro_series_master": ["series_id"],
 }
 
+STRICT_SCHEMA_TABLES = {
+    "normalized_global_macro_daily",
+}
+
 class SupabaseLoader:
     """Supabase DB 데이터 적재기 (아이뎀포턴시 중점)"""
     def __init__(self, url: str, key: str):
@@ -98,6 +102,14 @@ class SupabaseLoader:
         except Exception as e:
             missing_column = self._missing_schema_column(e)
             if missing_column and any(missing_column in record for record in records):
+                if table_name in STRICT_SCHEMA_TABLES:
+                    logger.error(
+                        f"[{table_name}] Column '{missing_column}' is missing in schema cache. "
+                        "Refusing to drop the column silently for this table."
+                    )
+                    if raise_on_error:
+                        raise
+                    return False
                 logger.warning(
                     f"[{table_name}] Column '{missing_column}' is missing in schema cache. "
                     "Retrying upsert without that column."

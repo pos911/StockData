@@ -54,6 +54,17 @@ class KISAuthManager:
             self._refresh_task = asyncio.create_task(self._background_token_refresher())
             logger.info("KIS Token background refresher started.")
 
+    async def shutdown(self):
+        """Stop the background refresher task cleanly."""
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._refresh_task = None
+
     async def get_access_token(self) -> str:
         """유효한 토큰 반환 (없으면 새로 발급)"""
         async with self._lock:

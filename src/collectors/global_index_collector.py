@@ -4,6 +4,20 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+_PYKRX_INDIVIDUAL_COLUMNS = [
+    "\uac1c\uc778",
+]
+
+_PYKRX_FOREIGN_COLUMNS = [
+    "\uc678\uad6d\uc778\ud569\uacc4",
+    "\uc678\uad6d\uc778",
+]
+
+_PYKRX_INSTITUTIONAL_COLUMNS = [
+    "\uae30\uad00\ud569\uacc4",
+    "\uae30\uad00",
+]
+
 
 class GlobalIndexCollector:
     """Collect global and Korean market index data via yfinance/pykrx."""
@@ -99,9 +113,9 @@ class GlobalIndexCollector:
                     continue
 
                 row = df.iloc[-1]
-                trends[f"{prefix}_individual_net_buy"] = self._row_number(row, ["개인"])
-                trends[f"{prefix}_foreign_net_buy"] = self._row_number(row, ["외국인합계", "외국인"])
-                trends[f"{prefix}_institutional_net_buy"] = self._row_number(row, ["기관합계", "기관"])
+                trends[f"{prefix}_individual_net_buy"] = self._row_number(row, _PYKRX_INDIVIDUAL_COLUMNS)
+                trends[f"{prefix}_foreign_net_buy"] = self._row_number(row, _PYKRX_FOREIGN_COLUMNS)
+                trends[f"{prefix}_institutional_net_buy"] = self._row_number(row, _PYKRX_INSTITUTIONAL_COLUMNS)
             return trends
         except Exception as exc:
             logger.warning(f"Failed to fetch Korean market investor trends: {exc}")
