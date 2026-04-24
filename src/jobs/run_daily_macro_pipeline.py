@@ -224,7 +224,7 @@ def run_pipeline(target_date: date):
 
     from src.collectors.global_index_collector import GlobalIndexCollector
 
-    global_index = GlobalIndexCollector()
+    global_index = GlobalIndexCollector(config)
     global_data = global_index.fetch_daily_indices(target_date)
 
     hy_spread = None

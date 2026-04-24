@@ -1,28 +1,20 @@
+import asyncio
 import logging
 from datetime import date, timedelta
 from typing import Any, Dict, Optional
 
+import requests
+
+from src.collectors.kis.auth import KISAuthManager
+
 logger = logging.getLogger(__name__)
-
-_PYKRX_INDIVIDUAL_COLUMNS = [
-    "\uac1c\uc778",
-]
-
-_PYKRX_FOREIGN_COLUMNS = [
-    "\uc678\uad6d\uc778\ud569\uacc4",
-    "\uc678\uad6d\uc778",
-]
-
-_PYKRX_INSTITUTIONAL_COLUMNS = [
-    "\uae30\uad00\ud569\uacc4",
-    "\uae30\uad00",
-]
 
 
 class GlobalIndexCollector:
-    """Collect global and Korean market index data via yfinance/pykrx."""
+    """Collect global and Korean market index data via yfinance and KIS."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
         self.ticker_map = {
             "usdkrw": "KRW=X",
             "dxy": "DX-Y.NYB",
@@ -66,7 +58,7 @@ class GlobalIndexCollector:
                 else:
                     result[f"{key}_change_rate"] = None
 
-            result.update(self._fetch_korean_investor_trends(target_date))
+            result.update(self._fetch_korean_market_snapshot(target_date))
             return result
         except Exception as exc:
             logger.error(f"Error fetching Global Indices: {exc}")
@@ -89,8 +81,12 @@ class GlobalIndexCollector:
             return index_dates.index(target_str)
         return len(close) - 1
 
-    def _fetch_korean_investor_trends(self, target_date: date) -> Dict[str, Any]:
+    def _fetch_korean_market_snapshot(self, target_date: date) -> Dict[str, Any]:
         empty = {
+            "kospi": None,
+            "kospi_change_rate": None,
+            "kosdaq": None,
+            "kosdaq_change_rate": None,
             "kospi_individual_net_buy": None,
             "kospi_foreign_net_buy": None,
             "kospi_institutional_net_buy": None,
@@ -98,35 +94,85 @@ class GlobalIndexCollector:
             "kosdaq_foreign_net_buy": None,
             "kosdaq_institutional_net_buy": None,
         }
+        kis_config = self.config.get("kis", {})
+        if not kis_config.get("app_key") or not kis_config.get("app_secret"):
+            return empty
         try:
-            from pykrx import stock
-
-            target = target_date.strftime("%Y%m%d")
-            trends = {}
-            for market in ("KOSPI", "KOSDAQ"):
-                prefix = market.lower()
-                df = stock.get_market_trading_value_by_date(target, target, market)
-                if df is None or df.empty:
-                    trends[f"{prefix}_individual_net_buy"] = None
-                    trends[f"{prefix}_foreign_net_buy"] = None
-                    trends[f"{prefix}_institutional_net_buy"] = None
-                    continue
-
-                row = df.iloc[-1]
-                trends[f"{prefix}_individual_net_buy"] = self._row_number(row, _PYKRX_INDIVIDUAL_COLUMNS)
-                trends[f"{prefix}_foreign_net_buy"] = self._row_number(row, _PYKRX_FOREIGN_COLUMNS)
-                trends[f"{prefix}_institutional_net_buy"] = self._row_number(row, _PYKRX_INSTITUTIONAL_COLUMNS)
-            return trends
+            return self._fetch_korean_market_snapshot_from_kis(target_date)
         except Exception as exc:
-            logger.warning(f"Failed to fetch Korean market investor trends: {exc}")
+            logger.warning(f"Failed to fetch Korean market snapshot from KIS: {exc}")
             return empty
 
+    def _fetch_korean_market_snapshot_from_kis(self, target_date: date) -> Dict[str, Any]:
+        token = asyncio.run(self._get_kis_access_token())
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": self.config["kis"]["app_key"],
+            "appsecret": self.config["kis"]["app_secret"],
+            "tr_id": "FHPTJ04040000",
+            "custtype": "P",
+        }
+        target = target_date.strftime("%Y%m%d")
+        result = {}
+        for prefix, market_code, market_name in (
+            ("kospi", "0001", "KSP"),
+            ("kosdaq", "1001", "KSQ"),
+        ):
+            row = self._fetch_market_daily_row(headers, target, market_code, market_name)
+            if not row:
+                continue
+            result[f"{prefix}"] = self._to_float(row.get("bstp_nmix_prpr"))
+            result[f"{prefix}_change_rate"] = self._to_float(row.get("bstp_nmix_prdy_ctrt"))
+            result[f"{prefix}_individual_net_buy"] = self._to_float(row.get("prsn_ntby_qty"))
+            result[f"{prefix}_foreign_net_buy"] = self._to_float(row.get("frgn_ntby_qty"))
+            result[f"{prefix}_institutional_net_buy"] = self._to_float(row.get("orgn_ntby_qty"))
+        return result
+
+    def _fetch_market_daily_row(
+        self,
+        headers: Dict[str, str],
+        target: str,
+        market_code: str,
+        market_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "U",
+            "FID_INPUT_ISCD": market_code,
+            "FID_INPUT_DATE_1": target,
+            "FID_INPUT_ISCD_1": market_name,
+            "FID_INPUT_DATE_2": target,
+            "FID_INPUT_ISCD_2": market_code,
+        }
+        response = requests.get(
+            "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-investor-daily-by-market",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("rt_cd") != "0":
+            raise ValueError(payload.get("msg1", "Unknown KIS market API error"))
+
+        rows = payload.get("output", [])
+        if not rows:
+            return None
+
+        for row in rows:
+            if row.get("stck_bsop_date") == target:
+                return row
+        return rows[0]
+
+    async def _get_kis_access_token(self) -> str:
+        auth = KISAuthManager(self.config)
+        return await auth.get_access_token()
+
     @staticmethod
-    def _row_number(row, column_names):
-        for column in column_names:
-            if column in row.index:
-                try:
-                    return float(row[column])
-                except (TypeError, ValueError):
-                    return None
-        return None
+    def _to_float(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
