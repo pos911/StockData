@@ -2,6 +2,7 @@ import asyncio
 import json
 import argparse
 import re
+import os
 from datetime import date, timedelta
 
 from src.utils.logger import get_logger
@@ -78,6 +79,37 @@ def _merge_latest_supply_record(supply_records: list, snapshot: dict) -> dict | 
     return merged
 
 
+def _sync_static_universe_to_master(loader: SupabaseLoader):
+    path = "config/stock_universe.json"
+    if not os.path.exists(path):
+        logger.warning("Static universe file is missing; skip stocks_master sync.")
+        return 0
+
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    records = []
+    for item in data:
+        if not item.get("enabled", True):
+            continue
+        records.append(
+            {
+                "symbol": item.get("symbol"),
+                "name": item.get("name"),
+                "market": item.get("market"),
+                "is_active": True,
+                "updated_at": get_current_kst().isoformat(),
+            }
+        )
+
+    if not records:
+        return 0
+
+    loader.upsert_records("stocks_master", records)
+    logger.info(f"Synchronized {len(records)} static universe records into stocks_master.")
+    return len(records)
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -102,6 +134,7 @@ async def run_pipeline(target_date: date, limit: int = None):
 
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     corp_code_map = opendart_collector.fetch_corp_code_map()
+    _sync_static_universe_to_master(loader)
 
     try:
         res = loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
