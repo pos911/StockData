@@ -217,10 +217,10 @@ def run_pipeline(target_date: date):
 
     from src.collectors.krx_collector import KRXCollector
 
-    krx = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
-    breadth_data = krx.fetch_market_breadth(target_date)
+    breadth_data = compute_market_breadth_from_prices(loader, target_date)
     if not breadth_data:
-        breadth_data = compute_market_breadth_from_prices(loader, target_date)
+        krx = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
+        breadth_data = krx.fetch_market_breadth(target_date)
 
     from src.collectors.global_index_collector import GlobalIndexCollector
 
