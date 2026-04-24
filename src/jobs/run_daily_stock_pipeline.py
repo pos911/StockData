@@ -79,6 +79,89 @@ def _merge_latest_supply_record(supply_records: list, snapshot: dict) -> dict | 
     return merged
 
 
+async def _repair_missing_snapshot_fields(
+    loader: SupabaseLoader,
+    collector: KISDomesticStockCollector,
+    target_date: date,
+    available_at: str,
+):
+    base_date_str = target_date.strftime("%Y-%m-%d")
+
+    active_res = loader.client.table("stocks_master").select("symbol").eq("is_active", True).execute()
+    active_symbols = {row["symbol"] for row in (active_res.data or [])}
+    if not active_symbols:
+        return
+
+    price_res = (
+        loader.client.table("normalized_stock_prices_daily")
+        .select("symbol, base_date, market_cap, outstanding_shares")
+        .eq("base_date", base_date_str)
+        .execute()
+    )
+    supply_res = (
+        loader.client.table("normalized_stock_supply_daily")
+        .select("symbol, base_date, foreign_holding_ratio")
+        .eq("base_date", base_date_str)
+        .execute()
+    )
+
+    prices_by_symbol = {row["symbol"]: row for row in (price_res.data or []) if row.get("symbol") in active_symbols}
+    supply_by_symbol = {row["symbol"]: row for row in (supply_res.data or []) if row.get("symbol") in active_symbols}
+
+    missing_symbols = set()
+    for symbol in active_symbols:
+        price_row = prices_by_symbol.get(symbol)
+        supply_row = supply_by_symbol.get(symbol)
+        if not price_row or price_row.get("market_cap") is None or price_row.get("outstanding_shares") is None:
+            missing_symbols.add(symbol)
+        if not supply_row or supply_row.get("foreign_holding_ratio") is None:
+            missing_symbols.add(symbol)
+
+    if not missing_symbols:
+        logger.info(f"No missing snapshot fields detected for {base_date_str}.")
+        return
+
+    logger.info(f"Repairing snapshot fields for {len(missing_symbols)} symbols on {base_date_str}.")
+    repaired_prices = 0
+    repaired_supply = 0
+
+    for symbol in sorted(missing_symbols):
+        snapshot = await collector.fetch_fundamental_info(
+            symbol,
+            base_date=base_date_str,
+            available_at=available_at,
+        )
+        if not snapshot:
+            logger.warning(f"[Repair] No fundamental snapshot returned for {symbol}")
+            continue
+
+        price_payload = {
+            "symbol": symbol,
+            "base_date": base_date_str,
+            "market_cap": snapshot.get("market_cap"),
+            "outstanding_shares": snapshot.get("listed_shares"),
+            "available_at": available_at,
+        }
+        if price_payload["market_cap"] is not None or price_payload["outstanding_shares"] not in (None, 0):
+            loader.upsert_records("normalized_stock_prices_daily", [price_payload])
+            repaired_prices += 1
+
+        supply_payload = {
+            "symbol": symbol,
+            "base_date": base_date_str,
+            "foreign_holding_ratio": snapshot.get("foreign_holding_ratio"),
+            "available_at": available_at,
+        }
+        if supply_payload["foreign_holding_ratio"] not in (None, 0):
+            loader.upsert_records("normalized_stock_supply_daily", [supply_payload])
+            repaired_supply += 1
+
+    logger.info(
+        f"Snapshot repair finished for {base_date_str}: "
+        f"price_rows={repaired_prices}, supply_rows={repaired_supply}"
+    )
+
+
 def _sync_static_universe_to_master(loader: SupabaseLoader):
     path = "config/stock_universe.json"
     if not os.path.exists(path):
@@ -362,6 +445,13 @@ async def run_pipeline(target_date: date, limit: int = None):
         loader.upsert_records("normalized_stock_fundamentals_ratios", ratio_buf)
     if master_buf:
         loader.upsert_records("stocks_master", master_buf)
+
+    await _repair_missing_snapshot_fields(
+        loader=loader,
+        collector=kis_collector,
+        target_date=target_date,
+        available_at=available_at.isoformat(),
+    )
 
     today_str = target_date.strftime("%Y-%m-%d")
     watch_tables = [
