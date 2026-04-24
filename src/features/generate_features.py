@@ -239,7 +239,7 @@ class FeatureGenerator:
         # 8. normalized_macro_series 모멘텀 피처 (ffill+bfill 보정)
         logger.info("Calculating macro_series momentum features...")
         try:
-            _ms_start = (target_date - timedelta(days=14)).strftime("%Y-%m-%d")
+            _ms_start = (target_date - timedelta(days=45)).strftime("%Y-%m-%d")
             _ms_end = end_date_str
             _ms_data = self.loader.fetch_all(
                 table_name="normalized_macro_series",
@@ -291,6 +291,68 @@ class FeatureGenerator:
                                 "feature_value": float(chg5d),
                                 "available_at": available_at_str
                             })
+
+                def _series_slice(series_id: str):
+                    return _ms_df[
+                        (_ms_df["series_id"] == series_id) &
+                        (_ms_df["base_date"] <= target_pd_date)
+                    ].sort_values("base_date")
+
+                def _append_global_feature(name: str, value):
+                    if value is None or not np.isfinite(value):
+                        return
+                    feature_records.append({
+                        "symbol": "GLOBAL",
+                        "base_date": end_date_str,
+                        "feature_name": name,
+                        "feature_value": float(value),
+                        "available_at": available_at_str,
+                    })
+
+                kr10y_series = _series_slice("KR_GOVT_10Y")
+                kr3y_series = _series_slice("KR_GOVT_3Y")
+                kraa_series = _series_slice("KR_CORP_AA_3Y")
+                krbbb_series = _series_slice("KR_CORP_BBB_3Y")
+                usdkrw_series = _series_slice("USDKRW")
+
+                if not kr10y_series.empty and not kr3y_series.empty:
+                    _append_global_feature(
+                        "KR_YIELD_SPREAD_10Y_3Y",
+                        kr10y_series.iloc[-1]["value"] - kr3y_series.iloc[-1]["value"],
+                    )
+
+                if not kraa_series.empty and not kr3y_series.empty:
+                    _append_global_feature(
+                        "KR_CREDIT_SPREAD_AA_3Y",
+                        kraa_series.iloc[-1]["value"] - kr3y_series.iloc[-1]["value"],
+                    )
+
+                if not krbbb_series.empty and not kr3y_series.empty:
+                    _append_global_feature(
+                        "KR_CREDIT_SPREAD_BBB_3Y",
+                        krbbb_series.iloc[-1]["value"] - kr3y_series.iloc[-1]["value"],
+                    )
+
+                if len(usdkrw_series) >= 2:
+                    current = usdkrw_series.iloc[-1]["value"]
+                    previous = usdkrw_series.iloc[-2]["value"]
+                    if previous != 0:
+                        _append_global_feature(
+                            "USDKRW_1D_CHG_PCT",
+                            ((current / previous) - 1) * 100,
+                        )
+
+                if len(kr10y_series) >= 2:
+                    _append_global_feature(
+                        "KR10Y_1D_CHG_BP",
+                        (kr10y_series.iloc[-1]["value"] - kr10y_series.iloc[-2]["value"]) * 100,
+                    )
+
+                if len(kr10y_series) >= 21:
+                    _append_global_feature(
+                        "KR10Y_20D_CHG_BP",
+                        (kr10y_series.iloc[-1]["value"] - kr10y_series.iloc[-21]["value"]) * 100,
+                    )
         except Exception as _me:
             logger.warning(f"Macro momentum feature calculation failed (non-fatal): {_me}")
 

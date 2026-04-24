@@ -14,7 +14,14 @@ CREATE TABLE IF NOT EXISTS macro_series_master (
     series_id VARCHAR(50) PRIMARY KEY,
     source VARCHAR(50),
     name VARCHAR(200),
+    name_ko VARCHAR(200),
+    stat_code VARCHAR(50),
+    item_code VARCHAR(50),
+    category VARCHAR(50),
+    unit VARCHAR(50),
     frequency VARCHAR(20),
+    is_active BOOLEAN DEFAULT TRUE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -50,6 +57,22 @@ CREATE TABLE IF NOT EXISTS raw_macro_series (
     collected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     available_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source, series_id, base_date)
+);
+
+CREATE TABLE IF NOT EXISTS raw_ecos_macro_daily (
+    source TEXT NOT NULL DEFAULT 'ECOS',
+    series_id TEXT NOT NULL,
+    stat_code TEXT NOT NULL,
+    item_code TEXT NOT NULL,
+    item_name TEXT,
+    date DATE NOT NULL,
+    time_raw TEXT NOT NULL,
+    value NUMERIC,
+    unit TEXT,
+    cycle TEXT,
+    collected_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    raw JSONB,
+    PRIMARY KEY (series_id, date)
 );
 
 CREATE TABLE IF NOT EXISTS raw_disclosures (

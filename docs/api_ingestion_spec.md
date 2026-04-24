@@ -19,11 +19,12 @@ The report-critical data is now available in these areas:
 The daily sync workflow runs in this order:
 
 1. `scripts/apply_schema_migrations.py`
-2. `src/jobs/run_daily_macro_pipeline.py`
-3. `src/jobs/run_daily_derivatives_pipeline.py`
-4. `src/jobs/run_daily_stock_pipeline.py`
-5. `src/jobs/run_daily_feature_pipeline.py`
-6. `scripts/verify_data.py`
+2. `python -m src.pipelines.collect_ecos_macro --all`
+3. `src/jobs/run_daily_macro_pipeline.py`
+4. `src/jobs/run_daily_derivatives_pipeline.py`
+5. `src/jobs/run_daily_stock_pipeline.py`
+6. `src/jobs/run_daily_feature_pipeline.py`
+7. `scripts/verify_data.py`
 
 ## Report-Critical Tables
 
@@ -67,6 +68,11 @@ Sources:
     - `kosdaq_institutional_net_buy`
 - `FRED`
   - `BAMLH0A0HYM2` -> `hy_spread`
+- `ECOS`
+  - `KR_GOVT_10Y` -> `kr10y` (preferred)
+  - `USDKRW` -> `usdkrw` (preferred)
+- `FRED`
+  - `IRLTLT01KRM156N` -> `kr10y` backup only if ECOS is unavailable
 
 Current columns used by reports:
 
@@ -98,9 +104,10 @@ Current columns used by reports:
 - `kosdaq_institutional_net_buy`
 - `available_at`
 
-Current known gap:
+Current behavior:
 
-- `kr10y` is populated from FRED monthly series `IRLTLT01KRM156N`, so it is not an intraday or daily market quote.
+- `kr10y` prefers ECOS daily series `KR_GOVT_10Y`
+- FRED monthly `IRLTLT01KRM156N` remains as fallback only
 
 ### `market_breadth_daily`
 
@@ -108,7 +115,8 @@ This table stores daily breadth used for quality checks and market diagnostics.
 
 Primary write path:
 
-- `src/jobs/run_daily_macro_pipeline.py`
+- `python -m src.pipelines.collect_ecos_macro --all`
+- `src/jobs/run_daily_macro_pipeline.py` for downstream consumption
 
 Current source priority:
 
@@ -230,6 +238,7 @@ Sources:
 
 - `FRED`
 - selected `Yahoo Finance` macro tickers
+- `ECOS`
 - optional `TradingEconomics` path if configured
 
 Stored columns:
@@ -267,6 +276,7 @@ The raw tables are used for traceability and debugging.
 - `raw_stock_prices_daily`
 - `raw_stock_supply_daily`
 - `raw_macro_series`
+- `raw_ecos_macro_daily`
 - `raw_disclosures`
 
 ## Report Retrieval Reference
@@ -314,7 +324,7 @@ Working now:
 
 Special handling:
 
-- `normalized_global_macro_daily.kr10y` is monthly FRED data stored on the latest daily macro row.
+- `normalized_global_macro_daily.kr10y` uses ECOS daily `KR_GOVT_10Y` first and falls back to FRED monthly only when necessary.
 
 ## Verification SQL
 

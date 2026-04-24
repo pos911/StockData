@@ -10,6 +10,7 @@ TABLE_CONFLICT_KEYS = {
     "raw_stock_prices_daily": ["source", "symbol", "base_date"],
     "raw_stock_supply_daily": ["source", "symbol", "base_date"],
     "raw_macro_series": ["source", "series_id", "base_date"],
+    "raw_ecos_macro_daily": ["series_id", "date"],
     "normalized_stock_prices_daily": ["symbol", "base_date"],
     "normalized_stock_supply_daily": ["symbol", "base_date"],
     "normalized_stock_short_selling": ["symbol", "base_date"],

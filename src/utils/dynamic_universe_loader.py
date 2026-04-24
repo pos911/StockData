@@ -48,6 +48,26 @@ class DynamicUniverseLoader:
                 results.append({"code": symbol, "name": name})
         return results
 
+
+    @staticmethod
+    def _merge_latest_price_record(price_records: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> Dict[str, Any] | None:
+        if not price_records:
+            return None
+        target = next((row for row in price_records if row.get("base_date") == snapshot.get("base_date")), price_records[0])
+        merged = dict(target)
+        merged["market_cap"] = snapshot.get("market_cap")
+        merged["outstanding_shares"] = snapshot.get("listed_shares")
+        return merged
+
+    @staticmethod
+    def _merge_latest_supply_record(supply_records: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> Dict[str, Any] | None:
+        if not supply_records:
+            return None
+        target = next((row for row in supply_records if row.get("base_date") == snapshot.get("base_date")), supply_records[0])
+        merged = dict(target)
+        merged["foreign_holding_ratio"] = snapshot.get("foreign_holding_ratio")
+        return merged
+
     async def get_combined_universe(self) -> List[Dict[str, Any]]:
         """
         모든 카테고리의 종목을 수집하여 통합된 리스트를 반환합니다.
@@ -115,24 +135,41 @@ class DynamicUniverseLoader:
         return final_universe
 
     async def trigger_auto_backfill(self, symbols: List[str]):
-        """
-        신규 편입 종목에 대해 과거 60영업일 치 데이터를 즉시 수집하여 적재.
-        """
+        """Backfill newly discovered symbols with price, supply, and snapshot fields."""
         end_dt = get_current_kst()
-        start_dt = end_dt - timedelta(days=90) # 주말, 공휴일 감안 90일
+        start_dt = end_dt - timedelta(days=90)
         start_date_str = start_dt.strftime("%Y%m%d")
         end_date_str = end_dt.strftime("%Y%m%d")
-        
+
         for idx, symbol in enumerate(symbols):
-            logger.info(f"[{idx+1}/{len(symbols)}] 자동 백필 진행 중 - {symbol}")
+            logger.info(f"[{idx+1}/{len(symbols)}] Auto backfill in progress - {symbol}")
             try:
-                await self.collector.fetch_ohlcv(symbol, timeframe='D', 
-                                              start_date=start_date_str, 
-                                              end_date=end_date_str)
+                available_at = get_current_kst().isoformat()
+                prices = await self.collector.fetch_ohlcv(
+                    symbol,
+                    timeframe='D',
+                    start_date=start_date_str,
+                    end_date=end_date_str,
+                    available_at=available_at,
+                )
+                supply = await self.collector.fetch_investor_trend(symbol, available_at=available_at)
+                snapshot = await self.collector.fetch_fundamental_info(
+                    symbol,
+                    base_date=end_dt.strftime("%Y-%m-%d"),
+                    available_at=available_at,
+                )
+
+                if snapshot:
+                    merged_price = self._merge_latest_price_record(prices, snapshot)
+                    if merged_price:
+                        self.loader.upsert_records("normalized_stock_prices_daily", [merged_price])
+
+                    merged_supply = self._merge_latest_supply_record(supply, snapshot)
+                    if merged_supply:
+                        self.loader.upsert_records("normalized_stock_supply_daily", [merged_supply])
             except Exception as e:
-                logger.error(f"백필 실패 - {symbol}: {e}")
-            
-            # Rate Limit 준수: 초당 2건 처리 제한 
+                logger.error(f"Auto backfill failed - {symbol}: {e}")
+
             await asyncio.sleep(0.5)
 
     async def _load_category_0(self) -> List[Dict[str, str]]:

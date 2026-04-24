@@ -254,7 +254,8 @@ SELECT jsonb_pretty(
                 ),
                 'known_special_case_fields',
                 jsonb_build_object(
-                    'normalized_global_macro_daily.kr10y_is_monthly_fred', true
+                    'normalized_global_macro_daily.kr10y_prefers_ecos_daily', true,
+                    'normalized_global_macro_daily.kr10y_fred_is_fallback_only', true
                 )
             )
         )

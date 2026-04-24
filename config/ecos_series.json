@@ -1,0 +1,156 @@
+[
+  {
+    "series_id": "KR_CALL_RATE",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010101000",
+    "cycle": "D",
+    "name_ko": "콜금리(1일, 전체거래)",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_GOVT_1Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010190000",
+    "cycle": "D",
+    "name_ko": "국고채 1년",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_GOVT_3Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010200000",
+    "cycle": "D",
+    "name_ko": "국고채 3년",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_GOVT_5Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010200001",
+    "cycle": "D",
+    "name_ko": "국고채 5년",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_GOVT_10Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010210000",
+    "cycle": "D",
+    "name_ko": "국고채 10년",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_GOVT_20Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010220000",
+    "cycle": "D",
+    "name_ko": "국고채 20년",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_GOVT_30Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010230000",
+    "cycle": "D",
+    "name_ko": "국고채 30년",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_CORP_AA_3Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010300000",
+    "cycle": "D",
+    "name_ko": "회사채 3년 AA-",
+    "category": "credit",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_CORP_BBB_3Y",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010320000",
+    "cycle": "D",
+    "name_ko": "회사채 3년 BBB-",
+    "category": "credit",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_CD_91D",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010502000",
+    "cycle": "D",
+    "name_ko": "CD 91일",
+    "category": "rates",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "KR_CP_91D",
+    "source": "ECOS",
+    "stat_code": "817Y002",
+    "item_code": "010503000",
+    "cycle": "D",
+    "name_ko": "CP 91일",
+    "category": "credit",
+    "unit": "연%",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "USDKRW",
+    "source": "ECOS",
+    "stat_code": "731Y001",
+    "item_code": "0000001",
+    "cycle": "D",
+    "name_ko": "원/미국달러 환율",
+    "category": "fx",
+    "unit": "원",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "JPYKRW",
+    "source": "ECOS",
+    "stat_code": "731Y001",
+    "item_code": "0000002",
+    "cycle": "D",
+    "name_ko": "원/일본엔 환율",
+    "category": "fx",
+    "unit": "원",
+    "frequency": "daily"
+  },
+  {
+    "series_id": "CNYKRW",
+    "source": "ECOS",
+    "stat_code": "731Y001",
+    "item_code": "0000053",
+    "cycle": "D",
+    "name_ko": "원/중국위안 환율",
+    "category": "fx",
+    "unit": "원",
+    "frequency": "daily"
+  }
+]

@@ -82,6 +82,24 @@ def compute_market_breadth_from_prices(loader: SupabaseLoader, target_date: date
     }
 
 
+def fetch_latest_normalized_macro_value(loader: SupabaseLoader, series_id: str, target_date: date):
+    try:
+        response = (
+            loader.client.table("normalized_macro_series")
+            .select("value, base_date")
+            .eq("series_id", series_id)
+            .lte("base_date", target_date.strftime("%Y-%m-%d"))
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return response.data[0]
+    except Exception as exc:
+        logger.warning(f"Failed to read normalized macro series {series_id}: {exc}")
+    return None
+
+
 def run_pipeline(target_date: date):
     logger.info(f"Starting Daily Macro Pipeline up to {target_date}...")
 
@@ -237,20 +255,26 @@ def run_pipeline(target_date: date):
         except (ValueError, TypeError):
             pass
 
-    kr10y = None
-    raw_kr10y = fred.fetch_series(
-        series_id="IRLTLT01KRM156N",
-        observation_start=(target_date - timedelta(days=400)).strftime("%Y-%m-%d"),
-        limit=1,
-        sort_order="desc",
-    )
-    if raw_kr10y and raw_kr10y.get("observations"):
-        try:
-            value = raw_kr10y["observations"][0]["value"]
-            if value != ".":
-                kr10y = float(value)
-        except (ValueError, TypeError):
-            pass
+    ecos_kr10y = fetch_latest_normalized_macro_value(loader, "KR_GOVT_10Y", target_date)
+    kr10y = float(ecos_kr10y["value"]) if ecos_kr10y and ecos_kr10y.get("value") is not None else None
+    if kr10y is None:
+        raw_kr10y = fred.fetch_series(
+            series_id="IRLTLT01KRM156N",
+            observation_start=(target_date - timedelta(days=400)).strftime("%Y-%m-%d"),
+            limit=1,
+            sort_order="desc",
+        )
+        if raw_kr10y and raw_kr10y.get("observations"):
+            try:
+                value = raw_kr10y["observations"][0]["value"]
+                if value != ".":
+                    kr10y = float(value)
+            except (ValueError, TypeError):
+                pass
+
+    ecos_usdkrw = fetch_latest_normalized_macro_value(loader, "USDKRW", target_date)
+    if global_data and ecos_usdkrw and ecos_usdkrw.get("value") is not None:
+        global_data["usdkrw"] = float(ecos_usdkrw["value"])
 
     if global_data:
         global_record = {

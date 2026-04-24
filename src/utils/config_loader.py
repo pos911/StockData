@@ -36,6 +36,9 @@ def load_config() -> Dict[str, Any]:
     if not config.get("fred"):
         config["fred"] = {"api_key": os.getenv("FRED_API_KEY")}
 
+    if not config.get("ecos"):
+        config["ecos"] = {"api_key": os.getenv("ECOS_API_KEY")}
+
     if not config.get("naver"):
         config["naver"] = {
             "client_id": os.getenv("NAVER_CLIENT_ID"),
