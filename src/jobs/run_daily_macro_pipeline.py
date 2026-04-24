@@ -237,13 +237,28 @@ def run_pipeline(target_date: date):
         except (ValueError, TypeError):
             pass
 
+    kr10y = None
+    raw_kr10y = fred.fetch_series(
+        series_id="IRLTLT01KRM156N",
+        observation_start=(target_date - timedelta(days=400)).strftime("%Y-%m-%d"),
+        limit=1,
+        sort_order="desc",
+    )
+    if raw_kr10y and raw_kr10y.get("observations"):
+        try:
+            value = raw_kr10y["observations"][0]["value"]
+            if value != ".":
+                kr10y = float(value)
+        except (ValueError, TypeError):
+            pass
+
     if global_data:
         global_record = {
             "base_date": global_data.get("base_date"),
             "usdkrw": global_data.get("usdkrw"),
             "dxy": global_data.get("dxy"),
             "us10y": global_data.get("us10y"),
-            "kr10y": global_data.get("kr10y"),
+            "kr10y": kr10y,
             "kospi": global_data.get("kospi"),
             "kospi_change_rate": global_data.get("kospi_change_rate"),
             "kosdaq": global_data.get("kosdaq"),

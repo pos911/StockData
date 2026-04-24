@@ -289,6 +289,7 @@ class KISDomesticStockCollector(KISBaseCollector):
             "w52_high": _parse_int(output.get("w52_hgpr", 0)),
             "w52_low": _parse_int(output.get("w52_lwpr", 0)),
             "listed_shares": _parse_int(output.get("lstn_stcn", 0)),
+            "foreign_holding_ratio": _parse_float(output.get("hts_frgn_ehrt", 0)),
             "source": "KIS",
             "available_at": available_at or datetime.now().isoformat(),
         }

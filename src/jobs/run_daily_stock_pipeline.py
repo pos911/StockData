@@ -59,6 +59,25 @@ def _to_ratio_record(record: dict) -> dict:
     return {key: value for key, value in record.items() if key in allowed_keys}
 
 
+def _merge_latest_price_record(price_records: list, snapshot: dict) -> dict | None:
+    if not price_records:
+        return None
+    target = next((row for row in price_records if row.get("base_date") == snapshot.get("base_date")), price_records[0])
+    merged = dict(target)
+    merged["market_cap"] = snapshot.get("market_cap")
+    merged["outstanding_shares"] = snapshot.get("listed_shares")
+    return merged
+
+
+def _merge_latest_supply_record(supply_records: list, snapshot: dict) -> dict | None:
+    if not supply_records:
+        return None
+    target = next((row for row in supply_records if row.get("base_date") == snapshot.get("base_date")), supply_records[0])
+    merged = dict(target)
+    merged["foreign_holding_ratio"] = snapshot.get("foreign_holding_ratio")
+    return merged
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -185,13 +204,13 @@ async def run_pipeline(target_date: date, limit: int = None):
                         supply_buf.extend(bf_supply)
                     await asyncio.sleep(0.2)
 
-                    bf_ratio = await kis_collector.fetch_fundamental_info(
+                    bf_snapshot = await kis_collector.fetch_fundamental_info(
                         symbol,
                         base_date=target_date.strftime("%Y-%m-%d"),
                         available_at=available_at.isoformat(),
                     )
-                    if bf_ratio:
-                        ratio_buf.append(_to_ratio_record(bf_ratio))
+                    if bf_snapshot:
+                        ratio_buf.append(_to_ratio_record(bf_snapshot))
                     await asyncio.sleep(0.2)
 
                     logger.info(f"[Backfill] {symbol} buffered.")
@@ -207,8 +226,22 @@ async def run_pipeline(target_date: date, limit: int = None):
                 flush_buf(master_buf, "stocks_master")
 
             await kis_collector.fetch_short_selling(symbol, available_at=available_at.isoformat())
+            base_date_str = target_date.strftime("%Y-%m-%d")
+            snapshot_info = await kis_collector.fetch_fundamental_info(
+                symbol,
+                base_date=base_date_str,
+                available_at=available_at.isoformat(),
+            )
+            if snapshot_info:
+                enriched_price = _merge_latest_price_record(kis_ohlcv, snapshot_info)
+                if enriched_price:
+                    loader.upsert_records("normalized_stock_prices_daily", [enriched_price])
+
+                enriched_supply = _merge_latest_supply_record(supply_records, snapshot_info)
+                if enriched_supply:
+                    loader.upsert_records("normalized_stock_supply_daily", [enriched_supply])
+
             if _should_fetch_fundamentals(name):
-                base_date_str = target_date.strftime("%Y-%m-%d")
                 await fundamentals_collector.fetch_valuation_ratios(
                     symbol,
                     base_date=base_date_str,
