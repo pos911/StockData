@@ -26,7 +26,13 @@ SELECT jsonb_pretty(
                         UNION ALL
                         SELECT 'normalized_stock_supply_daily', MAX(base_date) FROM normalized_stock_supply_daily
                         UNION ALL
+                        SELECT 'normalized_stock_short_selling', MAX(base_date) FROM normalized_stock_short_selling
+                        UNION ALL
+                        SELECT 'normalized_stock_fundamentals', MAX(base_date) FROM normalized_stock_fundamentals
+                        UNION ALL
                         SELECT 'normalized_stock_fundamentals_ratios', MAX(base_date) FROM normalized_stock_fundamentals_ratios
+                        UNION ALL
+                        SELECT 'normalized_stock_events_daily', MAX(base_date) FROM normalized_stock_events_daily
                         UNION ALL
                         SELECT 'normalized_macro_series', MAX(base_date) FROM normalized_macro_series
                         UNION ALL
@@ -39,6 +45,8 @@ SELECT jsonb_pretty(
                         SELECT 'feature_store_daily', MAX(base_date) FROM feature_store_daily
                         UNION ALL
                         SELECT 'raw_ecos_macro_daily', MAX(date) FROM raw_ecos_macro_daily
+                        UNION ALL
+                        SELECT 'raw_disclosures', MAX(base_date) FROM raw_disclosures
                     ) freshness_base
                 ) freshness_rows
             ) freshness_json
@@ -148,6 +156,30 @@ SELECT jsonb_pretty(
                 )
             )
         ),
+        'disclosure_and_news_status',
+        (
+            SELECT jsonb_build_object(
+                'latest_raw_disclosures_date', (SELECT MAX(base_date) FROM raw_disclosures),
+                'latest_sources', (
+                    SELECT jsonb_agg(to_jsonb(x) ORDER BY x.source)
+                    FROM (
+                        SELECT source, MAX(base_date) AS latest_date, COUNT(*) AS row_count
+                        FROM raw_disclosures
+                        WHERE base_date = (SELECT MAX(base_date) FROM raw_disclosures)
+                        GROUP BY source
+                    ) x
+                ),
+                'latest_normalized_event_date', (SELECT MAX(base_date) FROM normalized_stock_events_daily)
+            )
+        ),
+        'stock_auxiliary_status',
+        (
+            SELECT jsonb_build_object(
+                'latest_short_selling_date', (SELECT MAX(base_date) FROM normalized_stock_short_selling),
+                'latest_fundamentals_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals),
+                'latest_ratio_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals_ratios)
+            )
+        ),
         'sample_stock_rows',
         (
             SELECT jsonb_agg(to_jsonb(x) ORDER BY x.symbol)
@@ -168,6 +200,15 @@ SELECT jsonb_pretty(
                     s.foreign_net_buy,
                     s.institutional_net_buy,
                     s.foreign_holding_ratio,
+                    ssell.short_volume,
+                    ssell.short_value,
+                    ssell.short_ratio,
+                    f.revenue,
+                    f.operating_income,
+                    f.net_income,
+                    f.total_assets,
+                    f.total_liabilities,
+                    f.total_equity,
                     r.per,
                     r.pbr,
                     r.roe,
@@ -188,6 +229,16 @@ SELECT jsonb_pretty(
                 LEFT JOIN normalized_stock_supply_daily s
                     ON s.symbol = ss.symbol
                    AND s.base_date = (SELECT MAX(base_date) FROM normalized_stock_supply_daily)
+                LEFT JOIN normalized_stock_short_selling ssell
+                    ON ssell.symbol = ss.symbol
+                   AND ssell.base_date = (SELECT MAX(base_date) FROM normalized_stock_short_selling)
+                LEFT JOIN normalized_stock_fundamentals f
+                    ON f.symbol = ss.symbol
+                   AND f.base_date = (
+                       SELECT MAX(base_date)
+                       FROM normalized_stock_fundamentals
+                       WHERE symbol = ss.symbol
+                   )
                 LEFT JOIN normalized_stock_fundamentals_ratios r
                     ON r.symbol = ss.symbol
                    AND r.base_date = p.base_date
@@ -275,6 +326,7 @@ SELECT jsonb_pretty(
                               AND p.base_date = (SELECT MAX(base_date) FROM normalized_stock_prices_daily)
                               AND p.outstanding_shares IS NOT NULL
                               AND s.foreign_holding_ratio IS NOT NULL
+                              AND p.market_cap IS NOT NULL
                         ),
                         '035420_ok', EXISTS (
                             SELECT 1
@@ -285,6 +337,42 @@ SELECT jsonb_pretty(
                               AND p.base_date = (SELECT MAX(base_date) FROM normalized_stock_prices_daily)
                               AND p.outstanding_shares IS NOT NULL
                               AND s.foreign_holding_ratio IS NOT NULL
+                              AND p.market_cap IS NOT NULL
+                        )
+                    )
+                ),
+                'disclosure_and_news_sources_present', (
+                    SELECT jsonb_build_object(
+                        'has_opendart_today', EXISTS (
+                            SELECT 1
+                            FROM raw_disclosures
+                            WHERE base_date = (SELECT MAX(base_date) FROM raw_disclosures)
+                              AND source = 'OpenDart'
+                        ),
+                        'has_navernews_today', EXISTS (
+                            SELECT 1
+                            FROM raw_disclosures
+                            WHERE base_date = (SELECT MAX(base_date) FROM raw_disclosures)
+                              AND source = 'NaverNews'
+                        )
+                    )
+                ),
+                'normalized_aux_tables_present', (
+                    SELECT jsonb_build_object(
+                        'has_short_selling_today', EXISTS (
+                            SELECT 1
+                            FROM normalized_stock_short_selling
+                            WHERE base_date = (SELECT MAX(base_date) FROM normalized_stock_short_selling)
+                        ),
+                        'has_fundamentals_today', EXISTS (
+                            SELECT 1
+                            FROM normalized_stock_fundamentals
+                            WHERE base_date = (SELECT MAX(base_date) FROM normalized_stock_fundamentals)
+                        ),
+                        'has_events_today', EXISTS (
+                            SELECT 1
+                            FROM normalized_stock_events_daily
+                            WHERE base_date = (SELECT MAX(base_date) FROM normalized_stock_events_daily)
                         )
                     )
                 )

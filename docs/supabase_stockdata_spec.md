@@ -2,62 +2,57 @@
 
 ## Purpose
 
-This document explains how to use the StockData tables stored in Supabase.
+This document is the canonical consumer-facing spec for the data loaded by
+`pos911/StockData` into Supabase.
 
-It focuses on three things:
+It answers three practical questions:
 
-1. Which table should be read for each use case
+1. Which table should be used for each analysis or report use case
 2. What the important columns mean
-3. How to verify that the latest load succeeded
+3. How to verify that the latest load actually succeeded
 
-## Core Rules
+## Read Rules
 
-### 1. Read latest data by `base_date`
+### 1. Prefer latest rows by date
 
-Most report and analysis logic should read the latest row by `base_date`.
+Most reads should use the latest row by date.
 
-- Stock prices: `normalized_stock_prices_daily`
-- Stock investor flows: `normalized_stock_supply_daily`
-- Market and macro snapshot: `normalized_global_macro_daily`
-- Market breadth: `market_breadth_daily`
-- Derivatives snapshot: `normalized_derivatives_daily`
-- Features: `feature_store_daily`
+- Stock-level daily data: latest `base_date`
+- Market and macro snapshot: latest `base_date`
+- ECOS raw macro data: latest `date`
+- Master tables: latest `updated_at`
 
-### 2. Active universe is defined by `stocks_master`
+### 2. Active stock universe is `stocks_master`
 
-The active report universe is based on `stocks_master.is_active = true`.
+The active report universe is defined by `stocks_master.is_active = true`.
 
-`config/stock_universe.json` is the input file, but the pipeline syncs it into
-`stocks_master` and downstream logic should use the table.
+`config/stock_universe.json` is an input file only. The pipeline syncs it into
+`stocks_master`, and downstream consumers should read the table.
 
-### 3. Read data by layer
+### 3. Read by layer
 
-- Raw: source response tracking
-- Normalized: report and analysis ready tables
-- Feature: derived indicators for model, signal, and report usage
+- Raw: source response tracking and audit
+- Normalized: report-ready structured data
+- Feature: derived indicators for model, signal, or report usage
 
-## Key Tables
+## Table Inventory
 
-## 1. Universe and Master
+## 1. Master Tables
 
 ### `stocks_master`
 
 Use:
 
 - Master list of tracked symbols
-- Base universe for report and feature generation
+- Base universe for reports and feature generation
 
 Important columns:
 
-- `symbol`: stock code
-- `name`: stock name
-- `market`: `KOSPI`, `KOSDAQ`, `DYNAMIC`, etc.
-- `is_active`: active flag
-- `updated_at`: last update timestamp
-
-Interpretation:
-
-- Only rows with `is_active = true` are part of the current live universe.
+- `symbol`
+- `name`
+- `market`
+- `is_active`
+- `updated_at`
 
 ### `macro_series_master`
 
@@ -77,6 +72,7 @@ Important columns:
 - `unit`
 - `frequency`
 - `is_active`
+- `updated_at`
 
 Examples:
 
@@ -84,13 +80,13 @@ Examples:
 - `USDKRW`
 - `DGS10`
 
-## 2. Raw Layer
+## 2. Raw Tables
 
 ### `raw_stock_prices_daily`
 
 Use:
 
-- Raw price payload tracking
+- Raw price payload tracking by source, symbol, and date
 
 Important columns:
 
@@ -105,7 +101,7 @@ Important columns:
 
 Use:
 
-- Raw investor flow payload tracking
+- Raw investor flow payload tracking by source, symbol, and date
 
 Important columns:
 
@@ -113,12 +109,14 @@ Important columns:
 - `symbol`
 - `base_date`
 - `raw_data`
+- `collected_at`
+- `available_at`
 
 ### `raw_macro_series`
 
 Use:
 
-- Backup raw store for FRED, Yahoo, ECOS, and other macro sources
+- Backup raw macro store for FRED, Yahoo, ECOS, and other macro providers
 
 Important columns:
 
@@ -126,12 +124,14 @@ Important columns:
 - `series_id`
 - `base_date`
 - `raw_data`
+- `collected_at`
+- `available_at`
 
 ### `raw_ecos_macro_daily`
 
 Use:
 
-- Dedicated raw store for ECOS series
+- Dedicated raw ECOS macro history
 
 Important columns:
 
@@ -148,7 +148,33 @@ Important columns:
 - `collected_at`
 - `raw`
 
-## 3. Normalized Layer
+### `raw_disclosures`
+
+Use:
+
+- Mixed raw event/news/disclosure store
+- Holds both OpenDart disclosure payloads and Naver News payloads
+
+Important columns:
+
+- `source`
+- `symbol`
+- `base_date`
+- `raw_data`
+- `collected_at`
+- `available_at`
+
+Source meaning:
+
+- `source = 'OpenDart'`: corporate disclosure raw payload
+- `source = 'NaverNews'`: Naver News search result raw payload
+
+Important clarification:
+
+- Naver News is currently stored in `raw_disclosures`
+- Naver News is not currently normalized into `normalized_stock_events_daily`
+
+## 3. Normalized Tables
 
 ### `normalized_stock_prices_daily`
 
@@ -195,14 +221,49 @@ Important columns:
 
 Interpretation:
 
-- `foreign_net_buy`: same day foreign net buy
+- `foreign_net_buy`: same-day foreign net buy
 - `foreign_holding_ratio`: foreign ownership ratio
+
+### `normalized_stock_short_selling`
+
+Use:
+
+- Daily short-selling snapshot by stock
+
+Important columns:
+
+- `symbol`
+- `base_date`
+- `short_volume`
+- `short_value`
+- `short_ratio`
+- `source`
+- `available_at`
+
+### `normalized_stock_fundamentals`
+
+Use:
+
+- Daily normalized financial statement values
+
+Important columns:
+
+- `symbol`
+- `base_date`
+- `revenue`
+- `operating_income`
+- `net_income`
+- `total_assets`
+- `total_liabilities`
+- `total_equity`
+- `source`
+- `available_at`
 
 ### `normalized_stock_fundamentals_ratios`
 
 Use:
 
-- Valuation, profitability, and balance sheet ratios
+- Daily valuation, profitability, and leverage ratios
 
 Important columns:
 
@@ -212,6 +273,29 @@ Important columns:
 - `pbr`
 - `roe`
 - `debt_ratio`
+- `source`
+- `available_at`
+
+### `normalized_stock_events_daily`
+
+Use:
+
+- Event-level normalized stock event table
+- Currently populated from parsed OpenDart disclosures
+
+Important columns:
+
+- `symbol`
+- `base_date`
+- `event_type`
+- `event_score`
+- `sentiment_score`
+- `available_at`
+
+Important clarification:
+
+- This is not currently a general news table
+- It is currently closer to a normalized disclosure-event table
 
 ### `normalized_macro_series`
 
@@ -243,7 +327,7 @@ Important series examples:
 Use:
 
 - Daily market and macro summary snapshot
-- Main source table for report-level market data
+- Primary report-level market snapshot table
 
 Important columns:
 
@@ -278,9 +362,9 @@ Important columns:
 
 Interpretation:
 
-- `kr10y`: now uses ECOS `KR_GOVT_10Y` daily yield as primary
+- `kr10y`: uses ECOS `KR_GOVT_10Y` daily yield as primary
 - FRED `IRLTLT01KRM156N` remains backup only
-- `usdkrw`: now prefers ECOS `USDKRW`
+- `usdkrw`: prefers ECOS `USDKRW`
 
 ### `market_breadth_daily`
 
@@ -296,6 +380,7 @@ Important columns:
 - `unchanged`
 - `advancing_volume`
 - `declining_volume`
+- `available_at`
 
 ### `normalized_derivatives_daily`
 
@@ -311,6 +396,7 @@ Important columns:
 - `open_interest`
 - `night_futures_return`
 - `expiration_flag`
+- `available_at`
 
 ## 4. Feature Layer
 
@@ -326,6 +412,7 @@ Key columns:
 - `base_date`
 - `feature_name`
 - `feature_value`
+- `available_at`
 
 Stock feature examples:
 
@@ -344,7 +431,7 @@ Global feature examples:
 - `KR10Y_1D_CHG_BP`
 - `KR10Y_20D_CHG_BP`
 
-## 5. Pipeline Logs
+## 5. Pipeline Log Table
 
 ### `pipeline_run_logs`
 
@@ -368,6 +455,35 @@ Job examples:
 - `daily_stock_pipeline`
 - `daily_feature_generator`
 
+## Actual Current Data Flow
+
+### OpenDart
+
+- Raw payload -> `raw_disclosures`
+- Parsed event rows -> `normalized_stock_events_daily`
+
+### Naver News
+
+- Raw payload -> `raw_disclosures`
+- No dedicated normalized news table yet
+
+### KIS stock data
+
+- Price raw -> `raw_stock_prices_daily`
+- Price normalized -> `normalized_stock_prices_daily`
+- Supply raw -> `raw_stock_supply_daily`
+- Supply normalized -> `normalized_stock_supply_daily`
+- Short selling -> `normalized_stock_short_selling`
+- Financial statements -> `normalized_stock_fundamentals`
+- Ratios -> `normalized_stock_fundamentals_ratios`
+
+### ECOS / macro data
+
+- ECOS raw -> `raw_ecos_macro_daily`
+- Backup raw -> `raw_macro_series`
+- Normalized time series -> `normalized_macro_series`
+- Daily market snapshot -> `normalized_global_macro_daily`
+
 ## Common Read Patterns
 
 ### Latest market snapshot
@@ -383,6 +499,14 @@ Job examples:
 
 - Filter `stocks_master.is_active = true`
 - Join to latest `normalized_stock_supply_daily.base_date`
+
+### Latest short-selling snapshot
+
+- Read latest `normalized_stock_short_selling.base_date`
+
+### Latest financial statements
+
+- Read latest `normalized_stock_fundamentals.base_date`
 
 ### Report-level stock join
 
@@ -409,27 +533,34 @@ Use these tables together:
 - `sp500`
 - 6 market-wide investor flow fields for KOSPI and KOSDAQ
 
-3. Sample stock snapshot fields
+3. Stock snapshot fields
 
 - `outstanding_shares`
 - `foreign_holding_ratio`
+- `market_cap`
 
-4. Pipeline health
+4. Event/news raw ingestion
+
+- `raw_disclosures` should show both `OpenDart` and `NaverNews` when available
+
+5. Pipeline health
 
 - Check recent `pipeline_run_logs` for `WARN` or `ERROR`
 
 ## Verification SQL
 
-Use the file below to check the latest data load in one shot:
+Use this file to check the latest load in one shot:
 
 - `sql/verify_stockdata_status.sql`
 
-This SQL returns one JSON report that includes:
+This SQL should return one JSON report containing:
 
-- freshness for key tables
-- latest global macro snapshot
+- freshness for all key master/raw/normalized/feature tables
+- latest market and macro snapshot
 - latest breadth and derivatives snapshot
-- ECOS raw and normalized load status
+- ECOS raw and normalized status
+- disclosure/news raw status
+- short selling / fundamentals / event table status
 - sample stock rows for 5 symbols
 - active universe summary
 - recent pipeline health
