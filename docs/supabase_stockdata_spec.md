@@ -173,6 +173,7 @@ Important clarification:
 
 - Naver News is currently stored in `raw_disclosures`
 - Naver News is not currently normalized into `normalized_stock_events_daily`
+- Naver News retention is managed as a rolling 12-hour window per symbol
 
 ## 3. Normalized Tables
 
@@ -465,6 +466,7 @@ Job examples:
 ### Naver News
 
 - Raw payload -> `raw_disclosures`
+- Only articles published within the latest 12 hours are retained
 - No dedicated normalized news table yet
 
 ### KIS stock data

@@ -193,6 +193,39 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
     return len(records)
 
 
+def _refresh_recent_naver_news(
+    loader: SupabaseLoader,
+    symbol: str,
+    news_items: list,
+    timestamp_now,
+):
+    loader.delete_records(
+        "raw_disclosures",
+        eq_filters={
+            "source": "NaverNews",
+            "symbol": symbol,
+        },
+    )
+
+    if not news_items:
+        logger.info(f"No recent Naver news within 12 hours for {symbol}.")
+        return 0
+
+    news_records = [
+        {
+            "source": "NaverNews",
+            "symbol": symbol,
+            "base_date": timestamp_now.strftime("%Y-%m-%d"),
+            "raw_data": json.dumps(item, ensure_ascii=False),
+            "collected_at": timestamp_now.isoformat(),
+            "available_at": timestamp_now.isoformat(),
+        }
+        for item in news_items
+    ]
+    loader.upsert_records("raw_disclosures", news_records)
+    return len(news_records)
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -408,20 +441,17 @@ async def run_pipeline(target_date: date, limit: int = None):
                         if event_records:
                             loader.upsert_records("normalized_stock_events_daily", event_records)
 
-            news_data = naver_collector.fetch_news(f"{name} {symbol}")
-            if news_data and news_data.get("items"):
-                news_records = [
-                    {
-                        "source": "NaverNews",
-                        "symbol": symbol,
-                        "base_date": target_date.strftime("%Y-%m-%d"),
-                        "raw_data": json.dumps(item),
-                        "collected_at": timestamp_now.isoformat(),
-                        "available_at": timestamp_now.isoformat(),
-                    }
-                    for item in news_data["items"]
-                ]
-                loader.upsert_records("raw_disclosures", news_records)
+            news_data = naver_collector.fetch_news(
+                f"{name} {symbol}",
+                freshness_hours=12,
+                now=timestamp_now,
+            )
+            _refresh_recent_naver_news(
+                loader=loader,
+                symbol=symbol,
+                news_items=(news_data or {}).get("items", []),
+                timestamp_now=timestamp_now,
+            )
 
             if not kis_ohlcv:
                 raw_data = krx_collector.fetch_daily_ohlcv(symbol, target_date)

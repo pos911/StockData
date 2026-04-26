@@ -141,6 +141,25 @@ class SupabaseLoader:
         except Exception as e:
             logger.error(f"Failed to log pipeline run: {e}")
 
+    def delete_records(
+        self,
+        table_name: str,
+        eq_filters: Optional[Dict[str, Any]] = None,
+        lt_filters: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        try:
+            query = self.client.table(table_name).delete()
+            for key, value in (eq_filters or {}).items():
+                query = query.eq(key, value)
+            for key, value in (lt_filters or {}).items():
+                query = query.lt(key, value)
+            query.execute()
+            logger.info(f"[{table_name}] Deleted records with filters eq={eq_filters}, lt={lt_filters}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete records from {table_name}: {e}")
+            return False
+
     def fetch_all(self, table_name: str, date_col: str, start_date: str, end_date: str, order_col: str = None, desc: bool = True) -> list:
         """
         범위 지정 및 자동 페이징(Chunking)을 통한 한도(1000건) 돌파 조회.
