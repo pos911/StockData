@@ -17,6 +17,73 @@ class KRXCollector:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
+    @staticmethod
+    def _normalize_market_label(value: str) -> str:
+        if not value:
+            return ""
+        label = str(value).strip().upper()
+        if "KOSPI" in label:
+            return "KOSPI"
+        if "KOSDAQ" in label:
+            return "KOSDAQ"
+        if "ETF" in label:
+            return "ETF"
+        if "KONEX" in label:
+            return "KONEX"
+        return label
+
+    def fetch_market_classification_map(self) -> Dict[str, Dict[str, str]]:
+        """Return symbol -> {name, market} using FinanceDataReader stock listings."""
+        try:
+            df = fdr.StockListing("KRX")
+            if df is None or df.empty:
+                return {}
+
+            symbol_col = "Code" if "Code" in df.columns else "Symbol" if "Symbol" in df.columns else None
+            name_col = "Name" if "Name" in df.columns else None
+            market_col = "Market" if "Market" in df.columns else None
+            if not symbol_col or not name_col or not market_col:
+                logger.warning(f"FDR listing missing expected columns: {list(df.columns)}")
+                return {}
+
+            mapping = {}
+            for _, row in df.iterrows():
+                symbol = str(row.get(symbol_col, "")).strip()
+                if not symbol:
+                    continue
+                mapping[symbol] = {
+                    "name": str(row.get(name_col, "")).strip(),
+                    "market": self._normalize_market_label(str(row.get(market_col, "")).strip()),
+                }
+            return mapping
+        except Exception as exc:
+            logger.warning(f"Failed to fetch market classification map from FDR: {exc}")
+
+        try:
+            from pykrx import stock
+
+            mapping = {}
+            for market in ("KOSPI", "KOSDAQ", "KONEX"):
+                for ticker in stock.get_market_ticker_list(market=market):
+                    mapping[ticker] = {
+                        "name": stock.get_market_ticker_name(ticker),
+                        "market": market,
+                    }
+
+            try:
+                for ticker in stock.get_etf_ticker_list():
+                    mapping[ticker] = {
+                        "name": stock.get_etf_ticker_name(ticker),
+                        "market": "ETF",
+                    }
+            except Exception as etf_exc:
+                logger.warning(f"Failed to fetch ETF ticker list from pykrx: {etf_exc}")
+
+            return mapping
+        except Exception as exc:
+            logger.warning(f"Failed to fetch market classification map from pykrx: {exc}")
+            return {}
+
     def fetch_daily_ohlcv(self, symbol: str, target_date: date) -> Optional[Dict[str, Any]]:
         """FinanceDataReader를 이용한 OHLCV 수집"""
         try:

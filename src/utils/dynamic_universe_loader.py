@@ -30,12 +30,16 @@ class DynamicUniverseLoader:
         try:
             res = (
                 self.loader.client.table("static_stock_universe")
-                .select("symbol, name")
+                .select("symbol, name, market")
                 .eq("enabled", True)
                 .execute()
             )
             if res.data:
-                return [{"code": item["symbol"], "name": item["name"]} for item in res.data if item.get("symbol") and item.get("name")]
+                return [
+                    {"code": item["symbol"], "name": item["name"], "market": item.get("market")}
+                    for item in res.data
+                    if item.get("symbol") and item.get("name")
+                ]
         except Exception as exc:
             logger.warning(f"Failed to load static universe from DB, fallback to file: {exc}")
 
@@ -57,8 +61,16 @@ class DynamicUniverseLoader:
             symbol = item.get("symbol")
             name = item.get("name")
             if symbol and name:
-                results.append({"code": symbol, "name": name})
+                results.append({"code": symbol, "name": name, "market": item.get("market")})
         return results
+
+    @staticmethod
+    def _resolve_market(existing_market: str | None, new_market: str | None) -> str | None:
+        if not existing_market:
+            return new_market
+        if existing_market == "DYNAMIC" and new_market:
+            return new_market
+        return existing_market
 
 
     @staticmethod
@@ -99,7 +111,7 @@ class DynamicUniverseLoader:
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        combined_map = {} # code -> {name, sources: set}
+        combined_map = {} # code -> {name, market, sources: set}
         
         for i, res in enumerate(results):
             category_id = str(i)
@@ -113,9 +125,18 @@ class DynamicUniverseLoader:
                 if not code: continue
                 
                 if code not in combined_map:
-                    combined_map[code] = {"code": code, "name": name, "sources": {category_id}}
+                    combined_map[code] = {
+                        "code": code,
+                        "name": name,
+                        "market": item.get("market"),
+                        "sources": {category_id},
+                    }
                 else:
                     combined_map[code]["sources"].add(category_id)
+                    combined_map[code]["market"] = self._resolve_market(
+                        combined_map[code].get("market"),
+                        item.get("market"),
+                    )
         
         # 최종 리스트 가공 (Deduplicate & Merge)
         final_universe = []
@@ -123,6 +144,7 @@ class DynamicUniverseLoader:
             final_universe.append({
                 "symbol": code,
                 "name": data["name"],
+                "market": data.get("market"),
                 "source_category": ",".join(sorted(list(data["sources"])))
             })
             
@@ -188,40 +210,50 @@ class DynamicUniverseLoader:
         combined = {}
 
         for item in self._load_static_universe():
-            combined[item["code"]] = item["name"]
+            combined[item["code"]] = {
+                "name": item["name"],
+                "market": item.get("market"),
+            }
 
         try:
-            res = self.loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
+            res = self.loader.client.table("stocks_master").select("symbol, name, market").eq("is_active", True).execute()
             if res.data:
                 for stock in res.data:
-                    combined.setdefault(stock["symbol"], stock["name"])
+                    if stock["symbol"] not in combined:
+                        combined[stock["symbol"]] = {
+                            "name": stock["name"],
+                            "market": stock.get("market"),
+                        }
         except Exception as e:
             logger.error(f"Category 0 loading error (stocks_master): {e}")
 
-        return [{"code": code, "name": name} for code, name in combined.items()]
+        return [
+            {"code": code, "name": value["name"], "market": value.get("market")}
+            for code, value in combined.items()
+        ]
 
     async def _load_category_1(self) -> List[Dict[str, str]]:
         """Category 1 (KOSPI Vol Top 30)"""
         res = await self.collector.fetch_volume_rank(market_code='J')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"]} for r in res[:30]]
+        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSPI"} for r in res[:30]]
 
     async def _load_category_2(self) -> List[Dict[str, str]]:
         """Category 2 (KOSDAQ Vol Top 30)"""
         res = await self.collector.fetch_volume_rank(market_code='Q')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"]} for r in res[:30]]
+        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSDAQ"} for r in res[:30]]
 
     async def _load_category_3(self) -> List[Dict[str, str]]:
         """Category 3 (KOSDAQ Cap Top 30)"""
         res = await self.collector.fetch_market_cap_rank(market_code='Q')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"]} for r in res[:30]]
+        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSDAQ"} for r in res[:30]]
 
     async def _load_category_4(self) -> List[Dict[str, str]]:
         """Category 4 (KOSPI 200 Top 50)"""
         # FID_INPUT_ISCD '0001'은 KOSPI 200 인덱스를 의미함
         res = await self.collector.fetch_volume_rank(market_code='J', target_code='0001')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"]} for r in res[:50]]
+        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSPI"} for r in res[:50]]
 
     async def _load_category_5(self) -> List[Dict[str, str]]:
         """Category 5 (ETF Leaders): ETF 거래량 상위 20"""
         res = await self.collector.fetch_volume_rank(market_code='T')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"]} for r in res[:20]]
+        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "ETF"} for r in res[:20]]

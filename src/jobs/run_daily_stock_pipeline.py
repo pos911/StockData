@@ -34,19 +34,46 @@ _NON_COMMON_NAME_PATTERNS = [
     r"3우$",
 ]
 
+_ETF_NAME_MARKERS = ("KODEX", "TIGER", "RISE", "ACE", "PLUS", "SOL", "HANARO", "KOSEF", "TIMEFOLIO", "ETF")
+_ETN_NAME_MARKERS = ("ETN",)
 
-def _canonical_symbol_key(symbol: str) -> str:
+
+def _normalize_symbol_value(symbol: str) -> str:
     if not symbol:
         return ""
-    if symbol.startswith("Q") and len(symbol) > 1:
-        return symbol[1:]
-    return symbol
+    normalized = symbol[1:] if symbol.startswith("Q") and len(symbol) > 1 else symbol
+    return normalized.zfill(6) if normalized.isdigit() and len(normalized) < 6 else normalized
+
+
+def _canonical_symbol_key(symbol: str) -> str:
+    return _normalize_symbol_value(symbol)
 
 
 def _prefer_symbol(existing_symbol: str, new_symbol: str) -> str:
-    if new_symbol and new_symbol.startswith("Q"):
-        return new_symbol
-    return existing_symbol or new_symbol
+    normalized_existing = _normalize_symbol_value(existing_symbol)
+    normalized_new = _normalize_symbol_value(new_symbol)
+    if normalized_existing and len(normalized_existing) >= len(normalized_new):
+        return normalized_existing
+    return normalized_new or normalized_existing
+
+
+def _prefer_market(existing_market: str | None, new_market: str | None) -> str | None:
+    if not existing_market:
+        return new_market
+    if existing_market == "DYNAMIC" and new_market:
+        return new_market
+    return existing_market
+
+
+def _infer_market_from_name(name: str) -> str | None:
+    if not name:
+        return None
+    upper_name = name.upper()
+    if any(marker in upper_name for marker in _ETN_NAME_MARKERS):
+        return "ETN"
+    if any(marker in upper_name for marker in _ETF_NAME_MARKERS):
+        return "ETF"
+    return None
 
 
 def _should_fetch_fundamentals(name: str) -> bool:
@@ -176,7 +203,7 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
     enabled_records = []
     for item in data:
         static_record = {
-            "symbol": item.get("symbol"),
+            "symbol": _normalize_symbol_value(item.get("symbol")),
             "name": item.get("name"),
             "market": item.get("market"),
             "enabled": bool(item.get("enabled", True)),
@@ -275,6 +302,31 @@ def _is_naver_news_ingestion_enabled(config: dict) -> bool:
     return False
 
 
+def _infer_markets_from_supply_raw(loader: SupabaseLoader, base_date_str: str) -> dict:
+    market_map = {}
+    try:
+        rows = loader.fetch_all("raw_stock_supply_daily", "base_date", base_date_str, base_date_str)
+    except Exception as exc:
+        logger.warning(f"Failed to load raw_stock_supply_daily for market inference: {exc}")
+        return market_map
+
+    for row in rows:
+        symbol = row.get("symbol")
+        raw_payload = row.get("raw_data")
+        if not symbol or not raw_payload:
+            continue
+        try:
+            payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+        except Exception:
+            continue
+        market_div_code = payload.get("market_div_code")
+        if market_div_code == "J":
+            market_map[symbol] = "KOSPI"
+        elif market_div_code == "Q":
+            market_map[symbol] = "KOSDAQ"
+    return market_map
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -293,6 +345,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     universe = await universe_loader.get_combined_universe()
 
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
+    market_classification_map = krx_collector.fetch_market_classification_map()
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
     naver_news_enabled = _is_naver_news_ingestion_enabled(config)
     naver_collector = None
@@ -307,7 +360,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     corp_code_map = opendart_collector.fetch_corp_code_map()
 
     try:
-        res = loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
+        res = loader.client.table("stocks_master").select("symbol, name, market").eq("is_active", True).execute()
         active_stocks = res.data if res.data else []
         universe_keys = {_canonical_symbol_key(item["symbol"]) for item in universe}
         for stock in active_stocks:
@@ -316,6 +369,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                     {
                         "symbol": stock["symbol"],
                         "name": stock["name"],
+                        "market": stock.get("market"),
                         "source_category": "active_master",
                     }
                 )
@@ -326,6 +380,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     available_at = generate_available_at_for_eod(target_date)
     timestamp_now = get_current_kst()
     total_processed = 0
+    base_date_str = target_date.strftime("%Y-%m-%d")
 
     canonical_map = {}
     for stock in universe:
@@ -335,7 +390,37 @@ async def run_pipeline(target_date: date, limit: int = None):
             canonical_map[key] = dict(stock)
         else:
             canonical_map[key]["symbol"] = _prefer_symbol(canonical_map[key].get("symbol"), symbol)
+            canonical_map[key]["market"] = _prefer_market(canonical_map[key].get("market"), stock.get("market"))
     universe = list(canonical_map.values())
+
+    for stock in universe:
+        stock["symbol"] = _normalize_symbol_value(stock["symbol"])
+        listing_info = market_classification_map.get(_canonical_symbol_key(stock["symbol"])) or market_classification_map.get(stock["symbol"])
+        if listing_info:
+            stock["name"] = listing_info.get("name") or stock["name"]
+            stock["market"] = _prefer_market(stock.get("market"), listing_info.get("market"))
+        stock["market"] = _prefer_market(stock.get("market"), _infer_market_from_name(stock.get("name")))
+
+    inferred_market_map = _infer_markets_from_supply_raw(loader, base_date_str)
+    for stock in universe:
+        inferred_market = inferred_market_map.get(stock["symbol"])
+        if inferred_market:
+            stock["market"] = _prefer_market(stock.get("market"), inferred_market)
+
+    market_updates = []
+    for stock in universe:
+        market = stock.get("market") or "DYNAMIC"
+        market_updates.append(
+            {
+                "symbol": stock["symbol"],
+                "name": stock["name"],
+                "market": market,
+                "is_active": True,
+                "updated_at": get_current_kst().isoformat(),
+            }
+        )
+    if market_updates:
+        loader.upsert_records("stocks_master", market_updates)
 
     if limit:
         logger.info(f"Limiting execution to first {limit} symbols for verification.")
@@ -424,7 +509,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                 logger.warning(f"[Backfill] {symbol} backfill failed (non-fatal): {backfill_exc}")
 
             if symbol not in seen_master:
-                master_buf.append(StockNormalizer.normalize_stock_master(symbol, name, "DYNAMIC"))
+                master_buf.append(StockNormalizer.normalize_stock_master(symbol, name, stock.get("market") or "DYNAMIC"))
                 seen_master.add(symbol)
                 flush_buf(master_buf, "stocks_master")
 
