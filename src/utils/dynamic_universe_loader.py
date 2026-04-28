@@ -27,6 +27,18 @@ class DynamicUniverseLoader:
         self.loader = SupabaseLoader(url=supabase_url, key=supabase_key)
 
     def _load_static_universe(self) -> List[Dict[str, str]]:
+        try:
+            res = (
+                self.loader.client.table("static_stock_universe")
+                .select("symbol, name")
+                .eq("enabled", True)
+                .execute()
+            )
+            if res.data:
+                return [{"code": item["symbol"], "name": item["name"]} for item in res.data if item.get("symbol") and item.get("name")]
+        except Exception as exc:
+            logger.warning(f"Failed to load static universe from DB, fallback to file: {exc}")
+
         if not os.path.exists(self.static_universe_path):
             logger.warning(f"Static universe file is missing: {self.static_universe_path}")
             return []

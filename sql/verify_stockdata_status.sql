@@ -20,6 +20,8 @@ SELECT jsonb_pretty(
                     FROM (
                         SELECT 'stocks_master' AS table_name, MAX(updated_at)::date AS latest_date FROM stocks_master
                         UNION ALL
+                        SELECT 'static_stock_universe', MAX(updated_at)::date FROM static_stock_universe
+                        UNION ALL
                         SELECT 'macro_series_master', MAX(updated_at)::date FROM macro_series_master
                         UNION ALL
                         SELECT 'normalized_stock_prices_daily', MAX(base_date) FROM normalized_stock_prices_daily
@@ -59,6 +61,23 @@ SELECT jsonb_pretty(
                 'latest_updated_at', MAX(updated_at)
             )
             FROM stocks_master
+        ),
+        'static_universe_summary',
+        (
+            SELECT jsonb_build_object(
+                'enabled_count', COUNT(*) FILTER (WHERE enabled),
+                'disabled_count', COUNT(*) FILTER (WHERE NOT enabled),
+                'latest_updated_at', MAX(updated_at),
+                'symbols', (
+                    SELECT jsonb_agg(to_jsonb(x) ORDER BY x.symbol)
+                    FROM (
+                        SELECT symbol, name, market, enabled
+                        FROM static_stock_universe
+                        ORDER BY symbol
+                    ) x
+                )
+            )
+            FROM static_stock_universe
         ),
         'latest_global_macro',
         (

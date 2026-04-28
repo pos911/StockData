@@ -1,23 +1,5 @@
 [
   {
-    "symbol": "017670",
-    "name": "SK텔레콤",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
-    "symbol": "063080",
-    "name": "컴투스홀딩스",
-    "market": "KOSDAQ",
-    "enabled": true
-  },
-  {
-    "symbol": "047810",
-    "name": "한국항공우주",
-    "market": "KOSPI",
-    "enabled": true
-  },
-  {
     "symbol": "005930",
     "name": "삼성전자",
     "market": "KOSPI",
@@ -51,6 +33,18 @@
     "symbol": "015760",
     "name": "한국전력",
     "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "071050",
+    "name": "한국금융지주",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "058470",
+    "name": "리노공업",
+    "market": "KOSDAQ",
     "enabled": true
   }
 ]

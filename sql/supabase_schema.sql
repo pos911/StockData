@@ -10,6 +10,16 @@ CREATE TABLE IF NOT EXISTS stocks_master (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS static_stock_universe (
+    symbol VARCHAR(20) PRIMARY KEY,
+    name VARCHAR(100),
+    market VARCHAR(20),
+    enabled BOOLEAN DEFAULT TRUE,
+    source_file TEXT DEFAULT 'config/stock_universe.json',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS macro_series_master (
     series_id VARCHAR(50) PRIMARY KEY,
     source VARCHAR(50),

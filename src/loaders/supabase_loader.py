@@ -23,6 +23,7 @@ TABLE_CONFLICT_KEYS = {
     "normalized_derivatives_daily": ["base_date"],
     "feature_store_daily": ["symbol", "base_date", "feature_name"],
     "stocks_master": ["symbol"],
+    "static_stock_universe": ["symbol"],
     "macro_series_master": ["series_id"],
 }
 

@@ -171,26 +171,63 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
     with open(path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
 
-    records = []
+    synced_at = get_current_kst().isoformat()
+    static_records = []
+    enabled_records = []
     for item in data:
-        if not item.get("enabled", True):
-            continue
-        records.append(
-            {
-                "symbol": item.get("symbol"),
-                "name": item.get("name"),
-                "market": item.get("market"),
-                "is_active": True,
-                "updated_at": get_current_kst().isoformat(),
-            }
-        )
+        static_record = {
+            "symbol": item.get("symbol"),
+            "name": item.get("name"),
+            "market": item.get("market"),
+            "enabled": bool(item.get("enabled", True)),
+            "source_file": path,
+            "updated_at": synced_at,
+        }
+        static_records.append(static_record)
+        if static_record["enabled"]:
+            enabled_records.append(
+                {
+                    "symbol": static_record["symbol"],
+                    "name": static_record["name"],
+                    "market": static_record["market"],
+                    "is_active": True,
+                    "updated_at": synced_at,
+                }
+            )
 
-    if not records:
-        return 0
+    try:
+        existing_table_res = loader.client.table("static_stock_universe").select("symbol").execute()
+        existing_static_symbols = {row["symbol"] for row in (existing_table_res.data or [])}
+    except Exception as exc:
+        logger.error(f"Failed to fetch static_stock_universe: {exc}")
+        existing_static_symbols = set()
 
-    loader.upsert_records("stocks_master", records)
-    logger.info(f"Synchronized {len(records)} static universe records into stocks_master.")
-    return len(records)
+    file_symbols = {record["symbol"] for record in static_records if record.get("symbol")}
+    removed_symbols = sorted(existing_static_symbols - file_symbols)
+
+    if static_records:
+        loader.upsert_records("static_stock_universe", static_records)
+
+    for symbol in removed_symbols:
+        loader.delete_records("static_stock_universe", eq_filters={"symbol": symbol})
+        loader.delete_records("stocks_master", eq_filters={"symbol": symbol})
+
+    disabled_symbols = sorted(
+        record["symbol"]
+        for record in static_records
+        if record.get("symbol") and not record.get("enabled", True)
+    )
+    for symbol in disabled_symbols:
+        loader.delete_records("stocks_master", eq_filters={"symbol": symbol})
+
+    if enabled_records:
+        loader.upsert_records("stocks_master", enabled_records)
+
+    logger.info(
+        f"Synchronized static universe: total={len(static_records)}, "
+        f"enabled={len(enabled_records)}, removed={len(removed_symbols)}, disabled={len(disabled_symbols)}"
+    )
+    return len(enabled_records)
 
 
 def _refresh_recent_naver_news(
@@ -242,6 +279,8 @@ async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
     config = load_config()
+    loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
+    _sync_static_universe_to_master(loader)
 
     auth_mgr = KISAuthManager(config)
     await auth_mgr.initialize()
@@ -265,9 +304,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     else:
         logger.info("Naver news ingestion is disabled by configuration.")
 
-    loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     corp_code_map = opendart_collector.fetch_corp_code_map()
-    _sync_static_universe_to_master(loader)
 
     try:
         res = loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()

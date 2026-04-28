@@ -22,12 +22,20 @@ Most reads should use the latest row by date.
 - ECOS raw macro data: latest `date`
 - Master tables: latest `updated_at`
 
-### 2. Active stock universe is `stocks_master`
+### 2. Configured watchlist and active universe are different
 
-The active report universe is defined by `stocks_master.is_active = true`.
+The configured watchlist is stored in `static_stock_universe`.
 
-`config/stock_universe.json` is an input file only. The pipeline syncs it into
-`stocks_master`, and downstream consumers should read the table.
+The broader active pipeline universe is stored in `stocks_master` with
+`is_active = true`.
+
+`config/stock_universe.json` is a source input file, but it is also synchronized
+into `static_stock_universe` as a separate traceable table.
+
+Read rules:
+
+- Use `static_stock_universe` to inspect the exact configured watchlist
+- Use `stocks_master` to inspect the broader active report / pipeline universe
 
 ### 3. Read by layer
 
@@ -137,12 +145,30 @@ Key report columns:
 
 ## 1. Master Tables
 
+### `static_stock_universe`
+
+Use:
+
+- Exact synchronized copy of `config/stock_universe.json`
+- Audit table for configured watchlist additions and removals
+- Primary table to confirm whether a symbol is explicitly configured by file
+
+Important columns:
+
+- `symbol`
+- `name`
+- `market`
+- `enabled`
+- `source_file`
+- `updated_at`
+
 ### `stocks_master`
 
 Use:
 
 - Master list of tracked symbols
 - Base universe for reports and feature generation
+- Broader active universe that may include dynamic discoveries
 
 Important columns:
 
@@ -596,6 +622,11 @@ Job examples:
 - Filter `stocks_master.is_active = true`
 - Join to latest `normalized_stock_prices_daily.base_date`
 
+### Latest configured static watchlist
+
+- Filter `static_stock_universe.enabled = true`
+- Join to latest stock-level tables by `symbol`
+
 ### Latest active stock flows
 
 - Filter `stocks_master.is_active = true`
@@ -640,12 +671,19 @@ Use these tables together:
 - `foreign_holding_ratio`
 - `market_cap`
 
-4. Event/news raw ingestion
+4. Static watchlist sync
+
+- `static_stock_universe` should match `config/stock_universe.json`
+- Added symbols should appear there with `enabled = true`
+- Removed symbols should no longer be present there
+- `stocks_master` may contain more symbols than the static watchlist
+
+5. Event/news raw ingestion
 
 - `raw_disclosures` should at minimum show `OpenDart`
 - `NaverNews` appears only if the news toggle is enabled again
 
-5. Pipeline health
+6. Pipeline health
 
 - Check recent `pipeline_run_logs` for `WARN` or `ERROR`
 
