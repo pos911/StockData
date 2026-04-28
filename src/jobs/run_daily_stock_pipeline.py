@@ -226,6 +226,18 @@ def _refresh_recent_naver_news(
     return len(news_records)
 
 
+def _is_naver_news_ingestion_enabled(config: dict) -> bool:
+    pipeline_config = config.get("pipeline", {})
+    if "enable_naver_news_ingestion" in pipeline_config:
+        return bool(pipeline_config.get("enable_naver_news_ingestion"))
+
+    naver_config = config.get("naver", {})
+    if "enabled" in naver_config:
+        return bool(naver_config.get("enabled"))
+
+    return False
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -243,10 +255,15 @@ async def run_pipeline(target_date: date, limit: int = None):
 
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
-    naver_collector = NaverNewsCollector(
-        client_id=config.get("naver", {}).get("client_id", ""),
-        client_secret=config.get("naver", {}).get("client_secret", ""),
-    )
+    naver_news_enabled = _is_naver_news_ingestion_enabled(config)
+    naver_collector = None
+    if naver_news_enabled:
+        naver_collector = NaverNewsCollector(
+            client_id=config.get("naver", {}).get("client_id", ""),
+            client_secret=config.get("naver", {}).get("client_secret", ""),
+        )
+    else:
+        logger.info("Naver news ingestion is disabled by configuration.")
 
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     corp_code_map = opendart_collector.fetch_corp_code_map()
@@ -441,17 +458,18 @@ async def run_pipeline(target_date: date, limit: int = None):
                         if event_records:
                             loader.upsert_records("normalized_stock_events_daily", event_records)
 
-            news_data = naver_collector.fetch_news(
-                f"{name} {symbol}",
-                freshness_hours=12,
-                now=timestamp_now,
-            )
-            _refresh_recent_naver_news(
-                loader=loader,
-                symbol=symbol,
-                news_items=(news_data or {}).get("items", []),
-                timestamp_now=timestamp_now,
-            )
+            if naver_collector is not None:
+                news_data = naver_collector.fetch_news(
+                    f"{name} {symbol}",
+                    freshness_hours=12,
+                    now=timestamp_now,
+                )
+                _refresh_recent_naver_news(
+                    loader=loader,
+                    symbol=symbol,
+                    news_items=(news_data or {}).get("items", []),
+                    timestamp_now=timestamp_now,
+                )
 
             if not kis_ohlcv:
                 raw_data = krx_collector.fetch_daily_ohlcv(symbol, target_date)

@@ -169,7 +169,8 @@ SELECT jsonb_pretty(
                         GROUP BY source
                     ) x
                 ),
-                'latest_normalized_event_date', (SELECT MAX(base_date) FROM normalized_stock_events_daily)
+                'latest_normalized_event_date', (SELECT MAX(base_date) FROM normalized_stock_events_daily),
+                'naver_news_expected_enabled', false
             )
         ),
         'stock_auxiliary_status',
@@ -354,7 +355,8 @@ SELECT jsonb_pretty(
                             FROM raw_disclosures
                             WHERE base_date = (SELECT MAX(base_date) FROM raw_disclosures)
                               AND source = 'NaverNews'
-                        )
+                        ),
+                        'navernews_required_today', false
                     )
                 ),
                 'normalized_aux_tables_present', (

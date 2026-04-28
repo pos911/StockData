@@ -35,6 +35,104 @@ The active report universe is defined by `stocks_master.is_active = true`.
 - Normalized: report-ready structured data
 - Feature: derived indicators for model, signal, or report usage
 
+## Report Core Tables
+
+The daily report should primarily read these tables.
+
+### 1. `normalized_global_macro_daily`
+
+Use for:
+
+- KOSPI / KOSDAQ / NASDAQ / S&P500 level snapshots
+- market-wide investor flows
+- FX and yield summary
+
+Key report columns:
+
+- `base_date`: report market date
+- `kospi`, `kosdaq`, `nasdaq`, `sp500`: latest index levels
+- `kospi_change_rate`, `kosdaq_change_rate`, `nasdaq_change_rate`, `sp500_change_rate`: daily return in percent
+- `usdkrw`: KRW per USD exchange rate
+- `us10y`: US 10Y Treasury yield
+- `kr10y`: Korea 10Y government bond yield, sourced from ECOS `KR_GOVT_10Y`
+- `kospi_individual_net_buy`, `kospi_foreign_net_buy`, `kospi_institutional_net_buy`: KOSPI market-wide net flows
+- `kosdaq_individual_net_buy`, `kosdaq_foreign_net_buy`, `kosdaq_institutional_net_buy`: KOSDAQ market-wide net flows
+
+### 2. `normalized_stock_prices_daily`
+
+Use for:
+
+- stock close, volume, value, market cap snapshot
+
+Key report columns:
+
+- `symbol`
+- `base_date`
+- `close_price`
+- `volume`
+- `trading_value`
+- `market_cap`
+- `outstanding_shares`
+
+### 3. `normalized_stock_supply_daily`
+
+Use for:
+
+- stock-level investor flow summary
+
+Key report columns:
+
+- `symbol`
+- `base_date`
+- `individual_net_buy`
+- `foreign_net_buy`
+- `institutional_net_buy`
+- `foreign_holding_ratio`
+
+### 4. `normalized_stock_fundamentals_ratios`
+
+Use for:
+
+- valuation and quality ratios in stock summaries
+
+Key report columns:
+
+- `symbol`
+- `base_date`
+- `per`
+- `pbr`
+- `roe`
+- `debt_ratio`
+
+### 5. `market_breadth_daily`
+
+Use for:
+
+- advance / decline market breadth summary
+
+Key report columns:
+
+- `base_date`
+- `advances`
+- `declines`
+- `unchanged`
+- `advancing_volume`
+- `declining_volume`
+
+### 6. `normalized_stock_events_daily`
+
+Use for:
+
+- disclosure-derived stock event summary
+
+Key report columns:
+
+- `symbol`
+- `base_date`
+- `event_type`
+- `event_score`
+- `sentiment_score`
+
 ## Table Inventory
 
 ## 1. Master Tables
@@ -171,9 +269,10 @@ Source meaning:
 
 Important clarification:
 
-- Naver News is currently stored in `raw_disclosures`
+- OpenDart disclosures are actively ingested
+- Naver News ingestion is currently disabled by configuration
+- If Naver News is re-enabled later, it is stored only in `raw_disclosures`
 - Naver News is not currently normalized into `normalized_stock_events_daily`
-- Naver News retention is managed as a rolling 12-hour window per symbol
 
 ## 3. Normalized Tables
 
@@ -465,8 +564,8 @@ Job examples:
 
 ### Naver News
 
-- Raw payload -> `raw_disclosures`
-- Only articles published within the latest 12 hours are retained
+- Ingestion is currently disabled by configuration
+- If re-enabled later, raw payloads go to `raw_disclosures`
 - No dedicated normalized news table yet
 
 ### KIS stock data
@@ -543,7 +642,8 @@ Use these tables together:
 
 4. Event/news raw ingestion
 
-- `raw_disclosures` should show both `OpenDart` and `NaverNews` when available
+- `raw_disclosures` should at minimum show `OpenDart`
+- `NaverNews` appears only if the news toggle is enabled again
 
 5. Pipeline health
 
