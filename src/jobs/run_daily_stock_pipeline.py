@@ -457,7 +457,7 @@ async def run_pipeline(target_date: date, limit: int = None):
         limit=limit,
     )
 
-    universe = await universe_loader.get_combined_universe()
+    universe = await universe_loader.get_combined_universe(auto_backfill=limit is None)
     market_classification_map = krx_collector.fetch_market_classification_map()
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
     naver_news_enabled = _is_naver_news_ingestion_enabled(config)

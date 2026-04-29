@@ -93,7 +93,7 @@ class DynamicUniverseLoader:
         merged["foreign_holding_ratio"] = snapshot.get("foreign_holding_ratio")
         return merged
 
-    async def get_combined_universe(self) -> List[Dict[str, Any]]:
+    async def get_combined_universe(self, auto_backfill: bool = True) -> List[Dict[str, Any]]:
         """
         모든 카테고리의 종목을 수집하여 통합된 리스트를 반환합니다.
         중복된 종목은 하나로 합치고 source_category 필드에 출처를 모두 기록합니다.
@@ -161,9 +161,11 @@ class DynamicUniverseLoader:
             
         new_symbols = [u["symbol"] for u in final_universe if u["symbol"] not in existing_symbols]
         
-        if new_symbols:
+        if new_symbols and auto_backfill:
             logger.info(f"새로 식별된 신규 편입 종목: {len(new_symbols)}건. 백필을 시작합니다.")
             await self.trigger_auto_backfill(new_symbols)
+        elif new_symbols:
+            logger.info(f"Detected {len(new_symbols)} new symbols; auto backfill is disabled for this run.")
         else:
             logger.info("신규 편입 종목이 없습니다. 백필을 생략합니다.")
             

@@ -30,7 +30,7 @@ async def test_smart_universe():
         collector = KISDomesticStockCollector(config, auth_mgr, asyncio.Semaphore(2))
         loader = DynamicUniverseLoader(config, collector)
         
-        universe = await loader.get_combined_universe()
+        universe = await loader.get_combined_universe(auto_backfill=False)
         
         if universe:
             logger.info(f"✅ 수집 성공! 총 {len(universe)} 개 종목")
