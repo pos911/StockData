@@ -769,14 +769,27 @@ This SQL should return one JSON report containing:
 ## Consumer Verification SQL
 
 Run this in Supabase SQL Editor after a full `daily_sync` run. The query returns
-one JSON object. A report repository can use this as its readiness check before
-building a report.
+one JSON object. A report repository should use it to separate two decisions:
 
-Expected pass condition:
+1. Whether a report can be generated at all
+2. How much confidence to assign to full-market analysis
 
-- `report_guard_pass = true`
-- `price_coverage.covered_symbols > 2000`
-- latest stock pipeline logs show `daily_stock_full_price_pipeline.records_processed > 2000`
+Readiness levels:
+
+- `minimum_report_ready = true`: enough data exists to generate a watchlist /
+  curated-universe report
+- `full_market_coverage_pass = true`: latest stock prices cover enough
+  KOSPI/KOSDAQ symbols to describe full-market breadth, rankings, and market-wide
+  stock coverage confidently
+
+Important:
+
+- `full_market_coverage_pass = false` is not automatically a report-blocking
+  error
+- It means the report should label market-wide stock conclusions as partial or
+  unavailable
+- A completed full-market stock run should usually show
+  `daily_stock_full_price_pipeline.records_processed > 2000`
 
 ```sql
 WITH latest_price AS (
@@ -805,6 +818,26 @@ price_coverage AS (
     LEFT JOIN market_universe mu
         ON mu.symbol = p.symbol
     WHERE mu.symbol IS NOT NULL
+    GROUP BY lp.base_date
+),
+static_watchlist AS (
+    SELECT
+        symbol,
+        name,
+        market
+    FROM static_stock_universe
+    WHERE enabled = TRUE
+),
+watchlist_price_coverage AS (
+    SELECT
+        lp.base_date,
+        COUNT(sw.symbol) AS watchlist_symbols,
+        COUNT(p.symbol) AS watchlist_symbols_with_price
+    FROM latest_price lp
+    CROSS JOIN static_watchlist sw
+    LEFT JOIN normalized_stock_prices_daily p
+        ON p.symbol = sw.symbol
+       AND p.base_date = lp.base_date
     GROUP BY lp.base_date
 ),
 universe_summary AS (
@@ -874,8 +907,13 @@ sample_prices AS (
 SELECT jsonb_pretty(
     jsonb_build_object(
         'latest_price_date', (SELECT base_date FROM latest_price),
-        'report_guard_pass', COALESCE((SELECT covered_symbols FROM price_coverage), 0) > 2000,
+        'minimum_report_ready',
+            (SELECT base_date FROM latest_price) IS NOT NULL
+            AND COALESCE((SELECT watchlist_symbols FROM watchlist_price_coverage), 0) > 0
+            AND COALESCE((SELECT watchlist_symbols_with_price FROM watchlist_price_coverage), 0) > 0,
+        'full_market_coverage_pass', COALESCE((SELECT covered_symbols FROM price_coverage), 0) > 2000,
         'price_coverage', (SELECT to_jsonb(price_coverage) FROM price_coverage),
+        'watchlist_price_coverage', (SELECT to_jsonb(watchlist_price_coverage) FROM watchlist_price_coverage),
         'universe_summary', (SELECT to_jsonb(universe_summary) FROM universe_summary),
         'recent_pipeline_logs', COALESCE((SELECT recent_logs FROM pipeline_status), '[]'::jsonb),
         'sample_missing_price_symbols', COALESCE((SELECT rows FROM coverage_gaps), '[]'::jsonb),
@@ -943,3 +981,59 @@ LEFT JOIN normalized_stock_fundamentals_ratios r
 WHERE m.market IN ('KOSPI', 'KOSDAQ')
 ORDER BY m.symbol;
 ```
+
+## Report Repository Guardrail Policy
+
+Use two independent gates.
+
+### 1. Minimum report readiness
+
+This decides whether a report can be generated.
+
+Recommended conditions:
+
+- latest `normalized_global_macro_daily` row exists
+- latest `normalized_stock_prices_daily.base_date` exists
+- `static_stock_universe.enabled = true` has at least one symbol
+- at least one enabled static watchlist symbol has latest price data
+
+This gate can pass even when full-market coverage is partial.
+
+### 2. Full-market coverage quality
+
+This decides how strongly the report may describe the whole KOSPI/KOSDAQ market.
+
+Recommended conditions:
+
+- `stocks_master.market IN ('KOSPI', 'KOSDAQ')` has more than 2,000 symbols
+- latest `normalized_stock_prices_daily` covers more than 2,000 distinct
+  KOSPI/KOSDAQ symbols
+- recent `daily_stock_full_price_pipeline.records_processed` is more than 2,000
+
+If this gate fails:
+
+- do not block the whole report by default
+- label market-wide stock coverage as `PARTIAL`
+- avoid strong claims such as "entire market top volume stocks" unless the query
+  explicitly limits itself to covered symbols
+
+## Current Stock Pipeline Scope
+
+The stock pipeline is now designed as a hybrid:
+
+- Full price coverage:
+  KRX KIND KOSPI/KOSDAQ listed universe -> KIS OHLCV ->
+  `normalized_stock_prices_daily`
+- Detailed stock enrichment:
+  static / active / dynamic universe -> KIS supply, short selling, fundamentals,
+  OpenDart events, feature generation
+
+Therefore:
+
+- `normalized_stock_prices_daily` should become full-market after a successful
+  no-limit stock pipeline run
+- `normalized_stock_supply_daily`, `normalized_stock_fundamentals_ratios`, and
+  event tables are not expected to cover every listed KOSPI/KOSDAQ symbol every
+  hour
+- `stocks_master.is_active = true` is a curated/detailed-report flag, not the
+  full market universe flag
