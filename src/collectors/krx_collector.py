@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, Optional, List
+from io import StringIO
 import pandas as pd
 import requests
 import FinanceDataReader as fdr
@@ -83,6 +84,101 @@ class KRXCollector:
         except Exception as exc:
             logger.warning(f"Failed to fetch market classification map from pykrx: {exc}")
             return {}
+
+    def fetch_full_universe(self, target_date: Optional[date] = None) -> List[Dict[str, str]]:
+        """Return the full KOSPI/KOSDAQ listed universe for price ingestion.
+
+        KIS is still the source used for per-symbol OHLCV collection, but the
+        complete listing universe is more reliably sourced from KRX/FDR/pykrx.
+        """
+        kind_rows = self._fetch_full_universe_from_kind()
+        if len(kind_rows) >= 2000:
+            return kind_rows
+
+        mapping = self.fetch_market_classification_map()
+        universe = [
+            {"code": symbol, "name": info.get("name", ""), "market": info.get("market")}
+            for symbol, info in mapping.items()
+            if info.get("market") in {"KOSPI", "KOSDAQ"}
+        ]
+        if len(universe) >= 2000:
+            return sorted(universe, key=lambda row: row["code"])
+
+        try:
+            from pykrx import stock
+
+            query_base = target_date or date.today()
+            pykrx_map: Dict[str, Dict[str, str]] = {}
+            for offset in range(0, 14):
+                query_date = query_base - timedelta(days=offset)
+                query_ymd = query_date.strftime("%Y%m%d")
+                for market in ("KOSPI", "KOSDAQ"):
+                    try:
+                        tickers = stock.get_market_ticker_list(query_ymd, market=market)
+                    except Exception as market_exc:
+                        logger.warning(
+                            f"pykrx full universe failed for {market} on {query_ymd}: {market_exc}"
+                        )
+                        tickers = []
+
+                    for ticker in tickers or []:
+                        pykrx_map[ticker] = {
+                            "code": ticker,
+                            "name": stock.get_market_ticker_name(ticker),
+                            "market": market,
+                        }
+
+                if len(pykrx_map) >= 2000:
+                    return sorted(pykrx_map.values(), key=lambda row: row["code"])
+
+            if pykrx_map:
+                logger.warning(f"Full universe from pykrx is unexpectedly small: {len(pykrx_map)}")
+                return sorted(pykrx_map.values(), key=lambda row: row["code"])
+        except Exception as exc:
+            logger.warning(f"Failed to fetch full universe from pykrx: {exc}")
+
+        logger.warning(f"Full universe fallback is small: {len(universe)}")
+        return sorted(universe, key=lambda row: row["code"])
+
+    def _fetch_full_universe_from_kind(self) -> List[Dict[str, str]]:
+        market_urls = {
+            "KOSPI": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType=stockMkt",
+            "KOSDAQ": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType=kosdaqMkt",
+        }
+        rows: List[Dict[str, str]] = []
+        for market, url in market_urls.items():
+            try:
+                response = requests.get(url, headers=self.headers, timeout=20)
+                response.raise_for_status()
+                html = response.content.decode("euc-kr", errors="replace")
+                tables = pd.read_html(StringIO(html), flavor="lxml")
+                if not tables:
+                    logger.warning(f"KRX KIND full universe returned no table for {market}")
+                    continue
+                df = tables[0]
+                required = {"회사명", "종목코드"}
+                if not required.issubset(set(df.columns)):
+                    logger.warning(f"KRX KIND columns missing for {market}: {list(df.columns)}")
+                    continue
+
+                for _, row in df.iterrows():
+                    code = str(row.get("종목코드", "")).strip()
+                    name = str(row.get("회사명", "")).strip()
+                    if not code or not name or code.lower() == "nan":
+                        continue
+                    rows.append(
+                        {
+                            "code": code.zfill(6) if code.isdigit() else code,
+                            "name": name,
+                            "market": market,
+                        }
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to fetch full universe from KRX KIND for {market}: {exc}")
+
+        deduped = {row["code"]: row for row in rows}
+        logger.info(f"KRX KIND full universe loaded: {len(deduped)} symbols")
+        return sorted(deduped.values(), key=lambda row: row["code"])
 
     def fetch_daily_ohlcv(self, symbol: str, target_date: date) -> Optional[Dict[str, Any]]:
         """FinanceDataReader를 이용한 OHLCV 수집"""

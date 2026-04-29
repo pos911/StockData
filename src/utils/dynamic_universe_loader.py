@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Set
 from datetime import timedelta
 
 from src.collectors.kis.domestic import KISDomesticStockCollector
+from src.collectors.krx_collector import KRXCollector
 from src.utils.logger import get_logger
 from src.utils.time_utils import get_current_kst
 from src.loaders.supabase_loader import SupabaseLoader
@@ -167,6 +168,29 @@ class DynamicUniverseLoader:
             logger.info("신규 편입 종목이 없습니다. 백필을 생략합니다.")
             
         return final_universe
+
+    def fetch_full_universe(self, target_date=None) -> List[Dict[str, Any]]:
+        """Fetch the full KOSPI/KOSDAQ universe used for daily price coverage."""
+        min_count = int(self.config.get("pipeline", {}).get("full_universe_min_count", 2000))
+        krx_collector = KRXCollector(auth_key=self.config.get("krx", {}).get("auth_key", ""))
+        rows = krx_collector.fetch_full_universe(target_date=target_date)
+        universe = [
+            {
+                "symbol": item["code"],
+                "name": item.get("name") or item["code"],
+                "market": item.get("market"),
+                "source_category": "full_universe",
+            }
+            for item in rows
+            if item.get("market") in {"KOSPI", "KOSDAQ"}
+        ]
+        if len(universe) < min_count:
+            logger.warning(
+                f"Full universe count is below guardrail: count={len(universe)}, min_count={min_count}"
+            )
+        else:
+            logger.info(f"Full KOSPI/KOSDAQ universe loaded: {len(universe)} symbols")
+        return universe
 
     async def trigger_auto_backfill(self, symbols: List[str]):
         """Backfill newly discovered symbols with price, supply, and snapshot fields."""

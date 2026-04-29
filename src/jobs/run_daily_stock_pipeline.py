@@ -257,6 +257,105 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
     return len(enabled_records)
 
 
+def _sync_universe_to_master(
+    loader: SupabaseLoader,
+    universe: list[dict],
+    activate_new: bool = False,
+) -> int:
+    if not universe:
+        return 0
+
+    now_iso = get_current_kst().isoformat()
+    active_symbols = set()
+    if not activate_new:
+        try:
+            res = loader.client.table("stocks_master").select("symbol").eq("is_active", True).execute()
+            active_symbols = {row["symbol"] for row in (res.data or [])}
+        except Exception as exc:
+            logger.warning(f"Failed to read active stocks before full universe sync: {exc}")
+
+    records = []
+    seen = set()
+    for stock in universe:
+        symbol = _normalize_symbol_value(stock.get("symbol", ""))
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        records.append(
+            {
+                "symbol": symbol,
+                "name": stock.get("name") or symbol,
+                "market": stock.get("market") or "DYNAMIC",
+                "is_active": True if activate_new else symbol in active_symbols,
+                "updated_at": now_iso,
+            }
+        )
+
+    if records:
+        loader.upsert_records("stocks_master", records)
+    return len(records)
+
+
+async def _collect_full_universe_prices(
+    loader: SupabaseLoader,
+    kis_collector: KISDomesticStockCollector,
+    krx_collector: KRXCollector,
+    universe: list[dict],
+    target_date: date,
+    available_at: str,
+    limit: int | None = None,
+) -> int:
+    if not universe:
+        logger.error("Full universe is empty; skip full price ingestion.")
+        return 0
+
+    target_universe = universe[:limit] if limit else universe
+    base_ymd = target_date.strftime("%Y%m%d")
+    processed = 0
+
+    logger.info(
+        f"Starting full-universe price ingestion: symbols={len(target_universe)}, date={base_ymd}"
+    )
+    for idx, stock in enumerate(target_universe, 1):
+        symbol = _normalize_symbol_value(stock.get("symbol", ""))
+        name = stock.get("name") or symbol
+        if not symbol:
+            continue
+
+        try:
+            records = await kis_collector.fetch_ohlcv(
+                symbol,
+                timeframe="D",
+                start_date=base_ymd,
+                end_date=base_ymd,
+                available_at=available_at,
+            )
+            if not records:
+                fallback = krx_collector.fetch_daily_ohlcv(symbol, target_date)
+                if fallback:
+                    fallback["base_date"] = target_date.strftime("%Y-%m-%d")
+                    normalized = StockNormalizer.normalize_krx_daily(fallback, target_date)
+                    normalized["available_at"] = available_at
+                    loader.upsert_records("normalized_stock_prices_daily", [normalized])
+                    records = [normalized]
+
+            if records:
+                processed += 1
+            else:
+                logger.warning(f"No price row collected for full-universe symbol {name} ({symbol})")
+        except Exception as exc:
+            logger.error(f"Full-universe price ingestion failed for {name} ({symbol}): {exc}")
+
+        if idx % 50 == 0:
+            logger.info(f"Full-universe price ingestion progress: {idx}/{len(target_universe)}")
+            await asyncio.sleep(1.0)
+        else:
+            await asyncio.sleep(0.05)
+
+    logger.info(f"Full-universe price ingestion finished: processed={processed}/{len(target_universe)}")
+    return processed
+
+
 def _refresh_recent_naver_news(
     loader: SupabaseLoader,
     symbol: str,
@@ -342,9 +441,23 @@ async def run_pipeline(target_date: date, limit: int = None):
     fundamentals_collector = KISFundamentalsCollector(config, auth_mgr, semaphore)
 
     universe_loader = DynamicUniverseLoader(config, kis_collector)
-    universe = await universe_loader.get_combined_universe()
-
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
+    full_universe = universe_loader.fetch_full_universe(target_date=target_date)
+    _sync_universe_to_master(loader, full_universe, activate_new=False)
+
+    available_at = generate_available_at_for_eod(target_date)
+    base_date_str = target_date.strftime("%Y-%m-%d")
+    full_price_processed = await _collect_full_universe_prices(
+        loader=loader,
+        kis_collector=kis_collector,
+        krx_collector=krx_collector,
+        universe=full_universe,
+        target_date=target_date,
+        available_at=available_at.isoformat(),
+        limit=limit,
+    )
+
+    universe = await universe_loader.get_combined_universe()
     market_classification_map = krx_collector.fetch_market_classification_map()
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
     naver_news_enabled = _is_naver_news_ingestion_enabled(config)
@@ -377,10 +490,8 @@ async def run_pipeline(target_date: date, limit: int = None):
     except Exception as exc:
         logger.error(f"Failed to load active stocks from master: {exc}")
 
-    available_at = generate_available_at_for_eod(target_date)
     timestamp_now = get_current_kst()
     total_processed = 0
-    base_date_str = target_date.strftime("%Y-%m-%d")
 
     canonical_map = {}
     for stock in universe:
@@ -648,6 +759,12 @@ async def run_pipeline(target_date: date, limit: int = None):
     await auth_mgr.shutdown()
     await KISBaseCollector.close_session()
     loader.insert_log("daily_stock_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
+    loader.insert_log(
+        "daily_stock_full_price_pipeline",
+        target_date.strftime("%Y-%m-%d"),
+        "SUCCESS" if full_price_processed > 0 else "WARN",
+        full_price_processed,
+    )
     logger.info("Pipeline Finished Successfully.")
 
 
