@@ -22,7 +22,23 @@ Most reads should use the latest row by date.
 - ECOS raw macro data: latest `date`
 - Master tables: latest `updated_at`
 
-### 2. Configured watchlist and active universe are different
+### 2. Full market coverage and active report universe are different
+
+The daily stock pipeline now has two stock scopes:
+
+- Full KOSPI/KOSDAQ price coverage: sourced from KRX KIND listed-company
+  universe and loaded into `stocks_master` plus `normalized_stock_prices_daily`
+- Active report / detailed universe: symbols with `stocks_master.is_active = true`
+  and the static watchlist from `static_stock_universe`
+
+Important read rule:
+
+- Use `stocks_master.market IN ('KOSPI', 'KOSDAQ')` to check full market coverage
+- Use `stocks_master.is_active = true` only when the report intentionally wants
+  the curated active universe
+- Do not use `is_active = true` to validate full market price coverage
+
+### 3. Configured watchlist and active universe are different
 
 The configured watchlist is stored in `static_stock_universe`.
 
@@ -37,11 +53,31 @@ Read rules:
 - Use `static_stock_universe` to inspect the exact configured watchlist
 - Use `stocks_master` to inspect the broader active report / pipeline universe
 
-### 3. Read by layer
+### 4. Read by layer
 
 - Raw: source response tracking and audit
 - Normalized: report-ready structured data
 - Feature: derived indicators for model, signal, or report usage
+
+## Current Automation Contract
+
+`StockData` is a data-ingestion repository. It should not publish stock reports.
+
+The active GitHub Actions workflow is:
+
+- `.github/workflows/daily_sync.yml`
+- Schedule: hourly, `0 * * * *`
+- Manual run: `workflow_dispatch`
+- Execution order:
+  1. schema migration best effort
+  2. ECOS macro collection
+  3. global macro pipeline
+  4. derivatives pipeline
+  5. stock pipeline
+  6. feature pipeline
+  7. verification script
+
+There is intentionally no report-generation workflow in this repository.
 
 ## Report Core Tables
 
@@ -307,6 +343,8 @@ Important clarification:
 Use:
 
 - Daily stock price snapshot
+- Primary table for full KOSPI/KOSDAQ price coverage verification
+- Row grain: one row per `symbol`, `base_date`
 
 Important columns:
 
@@ -326,6 +364,14 @@ Interpretation:
 
 - `outstanding_shares`: total listed shares
 - `market_cap`: market capitalization
+
+Coverage expectation:
+
+- For a completed full-market run, the latest `base_date` should usually have
+  more than 2,000 distinct KOSPI/KOSDAQ symbols when joined to
+  `stocks_master.market IN ('KOSPI', 'KOSDAQ')`
+- If the count is much lower, the stock pipeline was probably run with
+  `--limit`, interrupted, or rate-limited before completion
 
 ### `normalized_stock_supply_daily`
 
@@ -579,6 +625,7 @@ Job examples:
 - `daily_macro_pipeline`
 - `daily_derivatives_pipeline`
 - `daily_stock_pipeline`
+- `daily_stock_full_price_pipeline`
 - `daily_feature_generator`
 
 ## Actual Current Data Flow
@@ -596,6 +643,7 @@ Job examples:
 
 ### KIS stock data
 
+- Full KOSPI/KOSDAQ listed universe -> `stocks_master`
 - Price raw -> `raw_stock_prices_daily`
 - Price normalized -> `normalized_stock_prices_daily`
 - Supply raw -> `raw_stock_supply_daily`
@@ -621,6 +669,12 @@ Job examples:
 
 - Filter `stocks_master.is_active = true`
 - Join to latest `normalized_stock_prices_daily.base_date`
+
+### Latest full KOSPI/KOSDAQ market price coverage
+
+- Filter `stocks_master.market IN ('KOSPI', 'KOSDAQ')`
+- Join to latest `normalized_stock_prices_daily.base_date`
+- Expect `COUNT(DISTINCT normalized_stock_prices_daily.symbol) > 2000`
 
 ### Latest configured static watchlist
 
@@ -687,6 +741,13 @@ Use these tables together:
 
 - Check recent `pipeline_run_logs` for `WARN` or `ERROR`
 
+7. Full market stock price coverage
+
+- `stocks_master` should contain the full KOSPI/KOSDAQ universe
+- Latest `normalized_stock_prices_daily` should cover more than 2,000 symbols
+- `daily_stock_full_price_pipeline.records_processed` should be more than 2,000
+  on a completed full run
+
 ## Verification SQL
 
 Use this file to check the latest load in one shot:
@@ -704,3 +765,181 @@ This SQL should return one JSON report containing:
 - sample stock rows for 5 symbols
 - active universe summary
 - recent pipeline health
+
+## Consumer Verification SQL
+
+Run this in Supabase SQL Editor after a full `daily_sync` run. The query returns
+one JSON object. A report repository can use this as its readiness check before
+building a report.
+
+Expected pass condition:
+
+- `report_guard_pass = true`
+- `price_coverage.covered_symbols > 2000`
+- latest stock pipeline logs show `daily_stock_full_price_pipeline.records_processed > 2000`
+
+```sql
+WITH latest_price AS (
+    SELECT MAX(base_date) AS base_date
+    FROM normalized_stock_prices_daily
+),
+market_universe AS (
+    SELECT
+        symbol,
+        name,
+        market,
+        is_active
+    FROM stocks_master
+    WHERE market IN ('KOSPI', 'KOSDAQ')
+),
+price_coverage AS (
+    SELECT
+        lp.base_date,
+        COUNT(DISTINCT p.symbol) AS covered_symbols,
+        COUNT(DISTINCT p.symbol) FILTER (WHERE mu.market = 'KOSPI') AS kospi_covered,
+        COUNT(DISTINCT p.symbol) FILTER (WHERE mu.market = 'KOSDAQ') AS kosdaq_covered,
+        COUNT(*) FILTER (WHERE p.close_price IS NULL) AS null_close_rows
+    FROM latest_price lp
+    LEFT JOIN normalized_stock_prices_daily p
+        ON p.base_date = lp.base_date
+    LEFT JOIN market_universe mu
+        ON mu.symbol = p.symbol
+    WHERE mu.symbol IS NOT NULL
+    GROUP BY lp.base_date
+),
+universe_summary AS (
+    SELECT
+        COUNT(*) AS total_market_universe,
+        COUNT(*) FILTER (WHERE market = 'KOSPI') AS kospi_universe,
+        COUNT(*) FILTER (WHERE market = 'KOSDAQ') AS kosdaq_universe,
+        COUNT(*) FILTER (WHERE is_active = TRUE) AS active_symbols
+    FROM market_universe
+),
+pipeline_status AS (
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'job_name', job_name,
+            'target_date', target_date,
+            'status', status,
+            'records_processed', records_processed,
+            'error_message', error_message
+        )
+        ORDER BY target_date DESC
+    ) AS recent_logs
+    FROM (
+        SELECT *
+        FROM pipeline_run_logs
+        WHERE job_name IN ('daily_stock_pipeline', 'daily_stock_full_price_pipeline')
+        ORDER BY target_date DESC
+        LIMIT 10
+    ) x
+),
+coverage_gaps AS (
+    SELECT jsonb_agg(to_jsonb(x) ORDER BY x.symbol) AS rows
+    FROM (
+        SELECT
+            mu.symbol,
+            mu.name,
+            mu.market
+        FROM market_universe mu
+        LEFT JOIN normalized_stock_prices_daily p
+            ON p.symbol = mu.symbol
+           AND p.base_date = (SELECT base_date FROM latest_price)
+        WHERE p.symbol IS NULL
+        ORDER BY mu.symbol
+        LIMIT 30
+    ) x
+),
+sample_prices AS (
+    SELECT jsonb_agg(to_jsonb(x) ORDER BY x.symbol) AS rows
+    FROM (
+        SELECT
+            p.symbol,
+            mu.name,
+            mu.market,
+            p.base_date,
+            p.close_price,
+            p.volume,
+            p.trading_value,
+            p.market_cap,
+            p.outstanding_shares
+        FROM normalized_stock_prices_daily p
+        JOIN market_universe mu
+            ON mu.symbol = p.symbol
+        WHERE p.base_date = (SELECT base_date FROM latest_price)
+        ORDER BY p.symbol
+        LIMIT 20
+    ) x
+)
+SELECT jsonb_pretty(
+    jsonb_build_object(
+        'latest_price_date', (SELECT base_date FROM latest_price),
+        'report_guard_pass', COALESCE((SELECT covered_symbols FROM price_coverage), 0) > 2000,
+        'price_coverage', (SELECT to_jsonb(price_coverage) FROM price_coverage),
+        'universe_summary', (SELECT to_jsonb(universe_summary) FROM universe_summary),
+        'recent_pipeline_logs', COALESCE((SELECT recent_logs FROM pipeline_status), '[]'::jsonb),
+        'sample_missing_price_symbols', COALESCE((SELECT rows FROM coverage_gaps), '[]'::jsonb),
+        'sample_latest_prices', COALESCE((SELECT rows FROM sample_prices), '[]'::jsonb)
+    )
+) AS verification_report;
+```
+
+## Minimal Report Repository Read Model
+
+A separate report repository should usually read:
+
+1. Market snapshot:
+   `normalized_global_macro_daily`, latest `base_date`
+2. Full price coverage:
+   `normalized_stock_prices_daily` joined to `stocks_master`
+3. Curated watchlist:
+   `static_stock_universe` joined to latest stock tables
+4. Stock-level flows:
+   `normalized_stock_supply_daily`
+5. Valuation ratios:
+   `normalized_stock_fundamentals_ratios`
+6. Market breadth:
+   `market_breadth_daily`
+7. Derivatives:
+   `normalized_derivatives_daily`
+8. Features:
+   `feature_store_daily`
+
+Example stock snapshot join:
+
+```sql
+WITH latest_price AS (
+    SELECT MAX(base_date) AS base_date
+    FROM normalized_stock_prices_daily
+)
+SELECT
+    m.symbol,
+    m.name,
+    m.market,
+    p.base_date,
+    p.close_price,
+    p.volume,
+    p.trading_value,
+    p.market_cap,
+    p.outstanding_shares,
+    s.individual_net_buy,
+    s.foreign_net_buy,
+    s.institutional_net_buy,
+    s.foreign_holding_ratio,
+    r.per,
+    r.pbr,
+    r.roe,
+    r.debt_ratio
+FROM stocks_master m
+JOIN normalized_stock_prices_daily p
+    ON p.symbol = m.symbol
+   AND p.base_date = (SELECT base_date FROM latest_price)
+LEFT JOIN normalized_stock_supply_daily s
+    ON s.symbol = m.symbol
+   AND s.base_date = p.base_date
+LEFT JOIN normalized_stock_fundamentals_ratios r
+    ON r.symbol = m.symbol
+   AND r.base_date = p.base_date
+WHERE m.market IN ('KOSPI', 'KOSDAQ')
+ORDER BY m.symbol;
+```

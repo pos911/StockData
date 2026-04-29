@@ -2,7 +2,7 @@
 
 on:
   schedule:
-    - cron: '30 9 * * *' # 18:30 KST
+    - cron: '0 * * * *' # hourly data sync
   workflow_dispatch:
 
 concurrency:
