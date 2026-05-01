@@ -9,6 +9,7 @@ logger = get_logger(__name__)
 TABLE_CONFLICT_KEYS = {
     "raw_stock_prices_daily": ["source", "symbol", "base_date"],
     "raw_stock_supply_daily": ["source", "symbol", "base_date"],
+    "raw_stock_short_selling": ["source", "symbol", "base_date"],
     "raw_macro_series": ["source", "series_id", "base_date"],
     "raw_ecos_macro_daily": ["series_id", "date"],
     "normalized_stock_prices_daily": ["symbol", "base_date"],
@@ -29,6 +30,11 @@ TABLE_CONFLICT_KEYS = {
 
 STRICT_SCHEMA_TABLES = {
     "normalized_global_macro_daily",
+    "normalized_stock_prices_daily",
+    "normalized_stock_supply_daily",
+    "normalized_stock_short_selling",
+    "normalized_macro_series",
+    "feature_store_daily",
 }
 
 class SupabaseLoader:
@@ -50,14 +56,51 @@ class SupabaseLoader:
             return records
 
         deduped = {}
-        passthrough = []
         for record in records:
             if any(record.get(field) in (None, "") for field in key_fields):
-                passthrough.append(record)
                 continue
             key = tuple(record.get(field) for field in key_fields)
             deduped[key] = record
-        return list(deduped.values()) + passthrough
+        return list(deduped.values())
+
+    @staticmethod
+    def _safe_sample(record: Dict[str, Any]) -> Dict[str, Any]:
+        sensitive = {"authorization", "appkey", "appsecret", "token", "api_key", "service_role_key"}
+        sample = {}
+        for key, value in (record or {}).items():
+            lowered = str(key).lower()
+            if any(part in lowered for part in sensitive):
+                sample[key] = "***"
+            elif isinstance(value, str) and len(value) > 300:
+                sample[key] = value[:300] + "...<truncated>"
+            else:
+                sample[key] = value
+        return sample
+
+    def _validate_conflict_keys(self, table_name: str, records: list, key_fields: Optional[List[str]], raise_on_error: bool) -> list:
+        if not key_fields:
+            return records
+
+        valid = []
+        skipped = []
+        for record in records:
+            missing = [field for field in key_fields if record.get(field) in (None, "")]
+            if missing:
+                skipped.append((missing, record))
+                continue
+            valid.append(record)
+
+        if skipped:
+            first_missing, first_record = skipped[0]
+            message = (
+                f"[{table_name}] Skipped {len(skipped)} records with missing conflict keys. "
+                f"missing_fields={first_missing}, sample_record={self._safe_sample(first_record)}"
+            )
+            logger.warning(message)
+            if raise_on_error or table_name in STRICT_SCHEMA_TABLES:
+                if raise_on_error:
+                    raise ValueError(message)
+        return valid
 
     @staticmethod
     def _missing_schema_column(error: Exception) -> Optional[str]:
@@ -88,7 +131,11 @@ class SupabaseLoader:
         if on_conflict is None and conflict_keys:
             on_conflict = ",".join(conflict_keys)
 
+        records = self._validate_conflict_keys(table_name, records, conflict_keys, raise_on_error)
         records = self._deduplicate(records, conflict_keys)
+        if not records:
+            logger.warning(f"[{table_name}] No valid records to upsert after key validation.")
+            return False if table_name in STRICT_SCHEMA_TABLES else True
         total = len(records)
         upserted = 0
         try:

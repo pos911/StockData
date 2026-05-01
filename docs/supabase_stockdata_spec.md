@@ -272,6 +272,27 @@ Important columns:
 - `collected_at`
 - `available_at`
 
+### `raw_stock_short_selling`
+
+Use:
+
+- Raw short-selling payload tracking by source, symbol, and date
+- Diagnostic store when KIS short-selling rows are empty, delayed, or missing expected fields
+
+Important columns:
+
+- `source`: `KIS`, `PYKRX`, or another fallback source
+- `symbol`
+- `base_date`
+- `raw_data`: sanitized API payload/row context
+- `collected_at`
+- `available_at`
+
+Important clarification:
+
+- This table is an audit/diagnostic layer. Report consumers should read report-ready values from `normalized_stock_short_selling`.
+- Rows with missing `symbol` or `base_date` are blocked before DB upsert.
+
 ### `raw_macro_series`
 
 Use:
@@ -648,7 +669,8 @@ Job examples:
 - Price normalized -> `normalized_stock_prices_daily`
 - Supply raw -> `raw_stock_supply_daily`
 - Supply normalized -> `normalized_stock_supply_daily`
-- Short selling -> `normalized_stock_short_selling`
+- Short-selling raw/diagnostic -> `raw_stock_short_selling`
+- Short-selling normalized -> `normalized_stock_short_selling`
 - Financial statements -> `normalized_stock_fundamentals`
 - Ratios -> `normalized_stock_fundamentals_ratios`
 

@@ -492,6 +492,17 @@ async def run_pipeline(target_date: date, limit: int = None):
 
     timestamp_now = get_current_kst()
     total_processed = 0
+    quality = {
+        "total_symbols": 0,
+        "price_success": 0,
+        "supply_success": 0,
+        "short_success": 0,
+        "short_empty": 0,
+        "short_failed": 0,
+        "fundamentals_success": 0,
+        "api_errors": 0,
+        "db_errors": 0,
+    }
 
     canonical_map = {}
     for stock in universe:
@@ -538,6 +549,7 @@ async def run_pipeline(target_date: date, limit: int = None):
         universe = universe[:limit]
 
     logger.info(f"Universe after dedup: {len(universe)} symbols")
+    quality["total_symbols"] = len(universe)
 
     price_buf = []
     supply_buf = []
@@ -624,7 +636,25 @@ async def run_pipeline(target_date: date, limit: int = None):
                 seen_master.add(symbol)
                 flush_buf(master_buf, "stocks_master")
 
-            await kis_collector.fetch_short_selling(symbol, available_at=available_at.isoformat())
+            if kis_ohlcv:
+                quality["price_success"] += 1
+            if supply_records:
+                quality["supply_success"] += 1
+
+            try:
+                short_records = await kis_collector.fetch_short_selling(
+                    symbol,
+                    target_date=target_date,
+                    market_code=stock.get("market"),
+                    available_at=available_at.isoformat(),
+                )
+                if short_records:
+                    quality["short_success"] += 1
+                else:
+                    quality["short_empty"] += 1
+            except Exception as short_exc:
+                quality["short_failed"] += 1
+                logger.error(f"Short selling collection failed for {symbol}: {short_exc}", exc_info=True)
             base_date_str = target_date.strftime("%Y-%m-%d")
             snapshot_info = await kis_collector.fetch_fundamental_info(
                 symbol,
@@ -655,6 +685,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                     base_date=base_date_str,
                     available_at=available_at.isoformat(),
                 )
+                quality["fundamentals_success"] += 1
             else:
                 logger.info(f"Skip fundamentals for non-common asset: {name} ({symbol})")
 
@@ -712,6 +743,7 @@ async def run_pipeline(target_date: date, limit: int = None):
 
             total_processed += 1
         except Exception as exc:
+            quality["api_errors"] += 1
             logger.error(f"Failed to process {symbol} ({name}): {exc}", exc_info=True)
             continue
 
@@ -758,7 +790,37 @@ async def run_pipeline(target_date: date, limit: int = None):
 
     await auth_mgr.shutdown()
     await KISBaseCollector.close_session()
-    loader.insert_log("daily_stock_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", total_processed)
+    price_rate = quality["price_success"] / max(quality["total_symbols"], 1)
+    supply_rate = quality["supply_success"] / max(quality["total_symbols"], 1)
+    issues = []
+    status = "SUCCESS"
+    if price_rate < 0.8:
+        status = "FAIL"
+        issues.append(f"price coverage low: {quality['price_success']}/{quality['total_symbols']}")
+    elif supply_rate < 0.5:
+        status = "WARN"
+        issues.append(f"supply coverage low: {quality['supply_success']}/{quality['total_symbols']}")
+    if quality["short_failed"] > 0:
+        status = "FAIL" if status == "FAIL" else "WARN"
+        issues.append(f"short_failed={quality['short_failed']}")
+    if quality["api_errors"] > 0:
+        status = "FAIL" if status == "FAIL" else "WARN"
+        issues.append(f"api_errors={quality['api_errors']}")
+
+    logger.info("=== DATA QUALITY SUMMARY ===")
+    for key, value in quality.items():
+        logger.info(f"{key}: {value}")
+    logger.info(f"status: {status}")
+    if issues:
+        logger.warning("quality_issues: " + "; ".join(issues))
+
+    loader.insert_log(
+        "daily_stock_pipeline",
+        target_date.strftime("%Y-%m-%d"),
+        status,
+        total_processed,
+        "; ".join(issues),
+    )
     loader.insert_log(
         "daily_stock_full_price_pipeline",
         target_date.strftime("%Y-%m-%d"),

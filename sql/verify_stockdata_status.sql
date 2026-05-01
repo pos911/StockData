@@ -48,6 +48,8 @@ SELECT jsonb_pretty(
                         UNION ALL
                         SELECT 'raw_ecos_macro_daily', MAX(date) FROM raw_ecos_macro_daily
                         UNION ALL
+                        SELECT 'raw_stock_short_selling', MAX(base_date) FROM raw_stock_short_selling
+                        UNION ALL
                         SELECT 'raw_disclosures', MAX(base_date) FROM raw_disclosures
                     ) freshness_base
                 ) freshness_rows
@@ -196,6 +198,17 @@ SELECT jsonb_pretty(
         (
             SELECT jsonb_build_object(
                 'latest_short_selling_date', (SELECT MAX(base_date) FROM normalized_stock_short_selling),
+                'latest_raw_short_selling_date', (SELECT MAX(base_date) FROM raw_stock_short_selling),
+                'latest_raw_short_selling_count', (
+                    SELECT COUNT(*)
+                    FROM raw_stock_short_selling
+                    WHERE base_date = (SELECT MAX(base_date) FROM raw_stock_short_selling)
+                ),
+                'latest_normalized_short_selling_count', (
+                    SELECT COUNT(*)
+                    FROM normalized_stock_short_selling
+                    WHERE base_date = (SELECT MAX(base_date) FROM normalized_stock_short_selling)
+                ),
                 'latest_fundamentals_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals),
                 'latest_ratio_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals_ratios)
             )
@@ -380,6 +393,11 @@ SELECT jsonb_pretty(
                 ),
                 'normalized_aux_tables_present', (
                     SELECT jsonb_build_object(
+                        'has_raw_short_selling_today', EXISTS (
+                            SELECT 1
+                            FROM raw_stock_short_selling
+                            WHERE base_date = (SELECT MAX(base_date) FROM raw_stock_short_selling)
+                        ),
                         'has_short_selling_today', EXISTS (
                             SELECT 1
                             FROM normalized_stock_short_selling

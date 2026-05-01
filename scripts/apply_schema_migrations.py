@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
 
@@ -51,6 +56,19 @@ CREATE TABLE IF NOT EXISTS raw_ecos_macro_daily (
 );
 """
 
+RAW_STOCK_SHORT_SELLING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS raw_stock_short_selling (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source VARCHAR(50),
+    symbol VARCHAR(20),
+    base_date DATE,
+    raw_data JSONB,
+    collected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    available_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source, symbol, base_date)
+);
+"""
+
 
 def apply_schema_migrations() -> None:
     config = load_config()
@@ -71,6 +89,7 @@ def apply_schema_migrations() -> None:
             for name, column_type in MACRO_SERIES_MASTER_COLUMNS.items()
         )
         statements.append(RAW_ECOS_MACRO_DAILY_TABLE_SQL)
+        statements.append(RAW_STOCK_SHORT_SELLING_TABLE_SQL)
         statements.append("NOTIFY pgrst, 'reload schema';")
 
         with psycopg2.connect(connection_string, connect_timeout=10) as conn:

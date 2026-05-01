@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import timedelta
+from pathlib import Path
 from typing import Dict, List, Sequence
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.collectors.ecos_client import EcosClient
 from src.collectors.ecos_fx import EcosFXCollector
@@ -21,6 +25,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start", help="Start date in YYYYMMDD.")
     parser.add_argument("--end", help="End date in YYYYMMDD.")
     parser.add_argument("--days", type=int, help="Collect only the last N calendar days.")
+    parser.add_argument("--lookback-days", type=int, default=14, help="Fallback lookback window when incremental ECOS has no rows.")
     parser.add_argument("--all", action="store_true", help="Collect all configured ECOS series.")
     return parser.parse_args()
 
@@ -62,8 +67,18 @@ def run_collection(args: argparse.Namespace) -> Dict[str, List[str] | int]:
         f"series={series_ids if series_ids else 'ALL'} start={start_date or 'incremental'} end={end_date}"
     )
 
-    rates_result = rates_collector.collect(series_ids=series_ids, start_date=start_date, end_date=end_date)
-    fx_result = fx_collector.collect(series_ids=series_ids, start_date=start_date, end_date=end_date)
+    rates_result = rates_collector.collect(
+        series_ids=series_ids,
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=args.lookback_days,
+    )
+    fx_result = fx_collector.collect(
+        series_ids=series_ids,
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=args.lookback_days,
+    )
 
     raw_records = rates_result["raw_records"] + fx_result["raw_records"]
     normalized_records = rates_result["normalized_records"] + fx_result["normalized_records"]
@@ -97,7 +112,14 @@ def run_collection(args: argparse.Namespace) -> Dict[str, List[str] | int]:
         if not raw_ecos_ok:
             warnings.append("raw_ecos_macro_daily upsert skipped; normalized data still loaded via fallback path.")
 
-    status = "SUCCESS" if not failures else "WARN"
+    if failures:
+        status = "WARN"
+    elif normalized_records:
+        status = "SUCCESS"
+    elif warnings:
+        status = "WARN_NO_NEW_DATA"
+    else:
+        status = "SUCCESS_WITH_NO_NEW_DATA"
     records_processed = len(normalized_records)
     error_message = "; ".join(failures[:10])
     loader.insert_log("daily_ecos_macro_pipeline", end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:8], status, records_processed, error_message)

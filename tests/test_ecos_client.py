@@ -120,6 +120,72 @@ class EcosClientTests(unittest.TestCase):
         self.assertEqual(len(deduped), 1)
         self.assertEqual(deduped[0]["value"], 3.2)
 
+    def test_collect_definitions_uses_lookback_when_incremental_empty(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_statistic(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    return []
+                return [
+                    {
+                        "series_id": "KR_GOVT_10Y",
+                        "date": "2026-04-24",
+                        "time": "20260424",
+                        "value": 3.817,
+                        "item_name": "국고채 10년",
+                        "unit": "연%",
+                        "collected_at": "2026-04-24T18:30:00+09:00",
+                    }
+                ]
+
+        class FakeQuery:
+            data = [{"date": "2026-04-24"}]
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def order(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                return self
+
+        class FakeLoader:
+            class Client:
+                def table(self, _name):
+                    return FakeQuery()
+
+            client = Client()
+
+        definition = {
+            "series_id": "KR_GOVT_10Y",
+            "source": "ECOS",
+            "stat_code": "060Y001",
+            "item_code": "010210000",
+            "cycle": "DD",
+            "name_ko": "국고채 10년",
+            "category": "rates",
+            "unit": "연%",
+            "frequency": "daily",
+        }
+        fake_client = FakeClient()
+        collector = BaseEcosSeriesCollector(client=fake_client, loader=FakeLoader())
+        result = collector.collect_definitions([definition], lookback_days=14)
+
+        self.assertEqual(len(fake_client.calls), 2)
+        self.assertEqual(fake_client.calls[0]["start_date"], "20260425")
+        self.assertEqual(len(result["normalized_records"]), 1)
+        self.assertEqual(result["normalized_records"][0]["series_id"], "KR_GOVT_10Y")
+
 
 if __name__ == "__main__":
     unittest.main()

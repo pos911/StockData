@@ -68,6 +68,7 @@ class BaseEcosSeriesCollector:
         definitions: Sequence[Dict[str, Any]],
         explicit_start: Optional[str] = None,
         explicit_end: Optional[str] = None,
+        lookback_days: int = 14,
     ) -> Dict[str, Any]:
         end_date = explicit_end or get_current_kst().date().strftime("%Y%m%d")
         raw_records: List[Dict[str, Any]] = []
@@ -92,9 +93,27 @@ class BaseEcosSeriesCollector:
                     end_date=end_date,
                     series_id=series_id,
                 )
+                if not rows and explicit_start is None:
+                    fallback_start = (get_current_kst().date() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                    logger.warning(
+                        f"{series_id}: no incremental ECOS rows for {start_date}..{end_date}; "
+                        f"retrying lookback fallback {fallback_start}..{end_date}"
+                    )
+                    rows = self.client.fetch_statistic(
+                        stat_code=definition["stat_code"],
+                        item_code=definition["item_code"],
+                        cycle=definition["cycle"],
+                        start_date=fallback_start,
+                        end_date=end_date,
+                        series_id=series_id,
+                    )
                 rows = self._deduplicate_by_date(rows)
                 if not rows:
-                    message = f"{series_id}: no ECOS rows returned for {start_date}..{end_date}"
+                    latest_existing = self._latest_existing_date(series_id)
+                    message = (
+                        f"{series_id}: no ECOS rows returned for {start_date}..{end_date}; "
+                        f"latest_existing={latest_existing or 'none'}"
+                    )
                     logger.warning(message)
                     warnings.append(message)
                 else:
@@ -137,6 +156,22 @@ class BaseEcosSeriesCollector:
             "warnings": warnings,
             "failures": failures,
         }
+
+    def _latest_existing_date(self, series_id: str) -> Optional[str]:
+        try:
+            result = (
+                self.loader.client.table("normalized_macro_series")
+                .select("base_date")
+                .eq("series_id", series_id)
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                return result.data[0]["base_date"]
+        except Exception as exc:
+            logger.warning(f"Failed to fetch latest normalized ECOS date for {series_id}: {exc}")
+        return None
 
     @staticmethod
     def _available_at(base_date: str) -> str:
@@ -181,6 +216,12 @@ class EcosRatesCollector(BaseEcosSeriesCollector):
         series_ids: Optional[Sequence[str]] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        lookback_days: int = 14,
     ) -> Dict[str, Any]:
         definitions = self.load_series_definitions(categories=("rates", "credit"), series_ids=series_ids)
-        return self.collect_definitions(definitions, explicit_start=start_date, explicit_end=end_date)
+        return self.collect_definitions(
+            definitions,
+            explicit_start=start_date,
+            explicit_end=end_date,
+            lookback_days=lookback_days,
+        )
