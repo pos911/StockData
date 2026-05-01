@@ -110,8 +110,12 @@ async def diagnose_kis(args):
         "kis_short_selling": "short_selling",
         "kis_investor": "investor_trend",
         "kis_ohlcv": "ohlcv",
+        "kis_volume_rank": None,
     }[args.source]
-    mapping = KIS_MAPPING[mapping_key]
+    mapping = KIS_MAPPING[mapping_key] if mapping_key else {
+        "path": "/uapi/domestic-stock/v1/quotations/volume-rank",
+        "tr_id": "FHPST01710000",
+    }
     markets = ["J", "Q"] if args.market == "auto" else [args.market]
     try:
         for market in markets:
@@ -121,6 +125,19 @@ async def diagnose_kis(args):
                     "FID_INPUT_ISCD": args.symbol,
                     "FID_INPUT_DATE_1": args.date,
                     "FID_INPUT_DATE_2": args.date,
+                }
+            elif args.source == "kis_volume_rank":
+                params = {
+                    "FID_COND_MRKT_DIV_CODE": market,
+                    "FID_COND_SCR_DIV_CODE": "20171",
+                    "FID_INPUT_ISCD": "0000",
+                    "FID_DIV_CLS_CODE": "0",
+                    "FID_BLNG_CLS_CODE": "0",
+                    "FID_TRGT_CLS_CODE": "0",
+                    "FID_TRGT_EXLS_CLS_CODE": "0",
+                    "FID_INPUT_PRICE_1": "",
+                    "FID_INPUT_PRICE_2": "",
+                    "FID_VOL_cnt": "",
                 }
             elif args.source == "kis_investor":
                 params = {"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": args.symbol}
@@ -134,7 +151,7 @@ async def diagnose_kis(args):
                     "FID_ORG_ADJ_PRC": "1",
                 }
             payload = await collector._request("GET", mapping["path"], mapping["tr_id"], params=params)
-            _diagnose_payload(payload, params, market, args.symbol, args.date, args.source)
+            _diagnose_payload(payload, params, market, args.symbol or "", args.date or "", args.source)
     finally:
         await KISBaseCollector.close_session()
 
@@ -165,13 +182,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol")
     parser.add_argument("--date", help="YYYYMMDD")
-    parser.add_argument("--source", required=True, choices=["kis_short_selling", "kis_investor", "kis_ohlcv", "ecos"])
-    parser.add_argument("--market", default="auto", choices=["J", "Q", "auto"])
+    parser.add_argument("--source", required=True, choices=["kis_short_selling", "kis_investor", "kis_ohlcv", "kis_volume_rank", "ecos"])
+    parser.add_argument("--market", default="auto", choices=["J", "Q", "T", "auto"])
     parser.add_argument("--series", help="ECOS series_id")
     args = parser.parse_args()
     if args.source == "ecos":
         diagnose_ecos(args)
     else:
+        if args.source == "kis_volume_rank":
+            asyncio.run(diagnose_kis(args))
+            return
         if not args.symbol or not args.date:
             raise SystemExit("--symbol and --date are required for KIS diagnostics")
         asyncio.run(diagnose_kis(args))

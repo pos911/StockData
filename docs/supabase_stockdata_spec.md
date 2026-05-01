@@ -293,6 +293,25 @@ Important clarification:
 - This table is an audit/diagnostic layer. Report consumers should read report-ready values from `normalized_stock_short_selling`.
 - Rows with missing `symbol` or `base_date` are blocked before DB upsert.
 
+### `raw_market_rankings`
+
+Use:
+
+- Raw KIS market ranking payloads by market and ranking type
+- Audit trail for dynamic universe categories such as KOSPI/KOSDAQ volume leaders and ETF volume leaders
+
+Important columns:
+
+- `source`
+- `base_date`
+- `market`
+- `rank_type`
+- `symbol`
+- `name`
+- `raw_rank`
+- `raw_data`
+- `available_at`
+
 ### `raw_macro_series`
 
 Use:
@@ -432,6 +451,60 @@ Important columns:
 - `short_ratio`
 - `source`
 - `available_at`
+
+### `normalized_stock_snapshots_daily`
+
+Use:
+
+- Snapshot-only fundamentals and quote metadata that do not require an OHLCV price row
+- Report helper for market cap, listed shares, foreign holding ratio, PER/PBR, and 52-week range
+
+Important columns:
+
+- `symbol`
+- `base_date`
+- `market_cap`
+- `outstanding_shares`
+- `foreign_holding_ratio`
+- `per`
+- `pbr`
+- `w52_high`
+- `w52_low`
+- `source`
+- `available_at`
+
+Important clarification:
+
+- This table must not be used for volume or trading-value ranking.
+- `normalized_stock_prices_daily` only stores rows with valid price/volume/trading value.
+
+### `normalized_market_rankings_daily`
+
+Use:
+
+- Report-ready ranking rows for market leader sections
+- Supports `market = KOSPI`, `KOSDAQ`, `KOSPI200`, `ETF`
+- Supports `rank_type = volume`, `market_cap`, and future ranking types
+
+Important columns:
+
+- `base_date`
+- `market`
+- `rank_type`
+- `rank`
+- `symbol`
+- `name`
+- `volume`
+- `trading_value`
+- `market_cap`
+- `change_rate`
+- `metric_value`
+- `source`
+- `available_at`
+
+Report rule:
+
+- Volume/trading-value Top reports must use `normalized_market_rankings_daily`, `vw_latest_valid_stock_prices`, or `normalized_stock_prices_daily` with `close_price`, `volume`, and `trading_value` all non-null.
 
 ### `normalized_stock_fundamentals`
 
@@ -671,6 +744,9 @@ Job examples:
 - Supply normalized -> `normalized_stock_supply_daily`
 - Short-selling raw/diagnostic -> `raw_stock_short_selling`
 - Short-selling normalized -> `normalized_stock_short_selling`
+- Snapshot-only fundamentals -> `normalized_stock_snapshots_daily`
+- Market rankings raw -> `raw_market_rankings`
+- Market rankings normalized -> `normalized_market_rankings_daily`
 - Financial statements -> `normalized_stock_fundamentals`
 - Ratios -> `normalized_stock_fundamentals_ratios`
 
@@ -786,6 +862,27 @@ This SQL should return one JSON report containing:
 - short selling / fundamentals / event table status
 - sample stock rows for 5 symbols
 - active universe summary
+
+### Snapshot-Only Price Cleanup
+
+If `verify_data.py` or `sql/verify_stockdata_status.sql` reports `snapshot_only_rows > 0`, run this cleanup manually in Supabase SQL Editor:
+
+- `sql/cleanup_snapshot_only_price_rows.sql`
+
+This removes rows where all OHLCV fields are null:
+
+- `open_price`
+- `high_price`
+- `low_price`
+- `close_price`
+- `volume`
+- `trading_value`
+
+After cleanup, report consumers should use:
+
+- `vw_latest_valid_stock_prices` for latest valid prices
+- `vw_valid_stock_prices_daily` for valid historical prices
+- `normalized_market_rankings_daily` for ranking sections
 - recent pipeline health
 
 ## Consumer Verification SQL

@@ -87,10 +87,56 @@ def _to_ratio_record(record: dict) -> dict:
     return {key: value for key, value in record.items() if key in allowed_keys}
 
 
+_PRICE_VALUE_FIELDS = ("open_price", "high_price", "low_price", "close_price", "volume", "trading_value")
+
+
+def _is_blank(value) -> bool:
+    return value is None or value == ""
+
+
+def _is_valid_price_row(row: dict | None) -> bool:
+    if not row:
+        return False
+    return not _is_blank(row.get("close_price")) and not _is_blank(row.get("volume")) and not _is_blank(row.get("trading_value"))
+
+
+def _is_snapshot_only_price_row(row: dict | None) -> bool:
+    if not row:
+        return False
+    return all(_is_blank(row.get(field)) for field in _PRICE_VALUE_FIELDS)
+
+
+def _to_snapshot_record(snapshot: dict, available_at: str) -> dict:
+    return {
+        "symbol": snapshot.get("symbol"),
+        "base_date": snapshot.get("base_date"),
+        "market_cap": snapshot.get("market_cap"),
+        "outstanding_shares": snapshot.get("listed_shares"),
+        "foreign_holding_ratio": snapshot.get("foreign_holding_ratio"),
+        "per": snapshot.get("per"),
+        "pbr": snapshot.get("pbr"),
+        "w52_high": snapshot.get("w52_high"),
+        "w52_low": snapshot.get("w52_low"),
+        "source": snapshot.get("source", "KIS"),
+        "available_at": available_at,
+    }
+
+
+def _price_snapshot_update(snapshot: dict, available_at: str) -> dict:
+    update_fields = {"available_at": available_at}
+    if snapshot.get("market_cap") is not None:
+        update_fields["market_cap"] = snapshot.get("market_cap")
+    if snapshot.get("listed_shares") not in (None, 0):
+        update_fields["outstanding_shares"] = snapshot.get("listed_shares")
+    return update_fields
+
+
 def _merge_latest_price_record(price_records: list, snapshot: dict) -> dict | None:
     if not price_records:
         return None
     target = next((row for row in price_records if row.get("base_date") == snapshot.get("base_date")), price_records[0])
+    if not _is_valid_price_row(target):
+        return None
     merged = dict(target)
     merged["market_cap"] = snapshot.get("market_cap")
     merged["outstanding_shares"] = snapshot.get("listed_shares")
@@ -121,7 +167,7 @@ async def _repair_missing_snapshot_fields(
 
     price_res = (
         loader.client.table("normalized_stock_prices_daily")
-        .select("symbol, base_date, market_cap, outstanding_shares")
+        .select("symbol, base_date, open_price, high_price, low_price, close_price, volume, trading_value, market_cap, outstanding_shares")
         .eq("base_date", base_date_str)
         .execute()
     )
@@ -162,15 +208,25 @@ async def _repair_missing_snapshot_fields(
             logger.warning(f"[Repair] No fundamental snapshot returned for {symbol}")
             continue
 
-        price_payload = {
-            "symbol": symbol,
-            "base_date": base_date_str,
-            "market_cap": snapshot.get("market_cap"),
-            "outstanding_shares": snapshot.get("listed_shares"),
-            "available_at": available_at,
-        }
-        if price_payload["market_cap"] is not None or price_payload["outstanding_shares"] not in (None, 0):
-            loader.upsert_records("normalized_stock_prices_daily", [price_payload])
+        loader.upsert_records("normalized_stock_snapshots_daily", [_to_snapshot_record(snapshot, available_at)])
+
+        price_row = prices_by_symbol.get(symbol)
+        if not _is_valid_price_row(price_row):
+            logger.warning(
+                "skip_snapshot_only_price_repair: "
+                f"symbol={symbol}, base_date={base_date_str}, "
+                f"existing_price_row={bool(price_row)}, "
+                f"close_price={price_row.get('close_price') if price_row else None}, "
+                f"volume={price_row.get('volume') if price_row else None}, "
+                f"trading_value={price_row.get('trading_value') if price_row else None}"
+            )
+        else:
+            update_fields = _price_snapshot_update(snapshot, available_at)
+            loader.update_record(
+                "normalized_stock_prices_daily",
+                {"symbol": symbol, "base_date": base_date_str},
+                update_fields,
+            )
             repaired_prices += 1
 
         supply_payload = {
@@ -387,6 +443,31 @@ def _refresh_recent_naver_news(
     ]
     loader.upsert_records("raw_disclosures", news_records)
     return len(news_records)
+
+
+def _fetch_price_quality(loader: SupabaseLoader, base_date_str: str) -> dict:
+    fields = "symbol, open_price, high_price, low_price, close_price, volume, trading_value"
+    rows = []
+    try:
+        rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", base_date_str, base_date_str)
+    except Exception as exc:
+        logger.warning(f"Failed to fetch price quality rows for {base_date_str}: {exc}")
+
+    total = len(rows)
+    null_close = sum(1 for row in rows if _is_blank(row.get("close_price")))
+    null_volume = sum(1 for row in rows if _is_blank(row.get("volume")))
+    null_trading = sum(1 for row in rows if _is_blank(row.get("trading_value")))
+    snapshot_only = sum(1 for row in rows if _is_snapshot_only_price_row(row))
+    valid = sum(1 for row in rows if _is_valid_price_row(row))
+    return {
+        "latest_price_date": base_date_str,
+        "latest_total_rows": total,
+        "null_close_rows": null_close,
+        "null_volume_rows": null_volume,
+        "null_trading_value_rows": null_trading,
+        "snapshot_only_rows": snapshot_only,
+        "valid_price_rows": valid,
+    }
 
 
 def _is_naver_news_ingestion_enabled(config: dict) -> bool:
@@ -662,9 +743,32 @@ async def run_pipeline(target_date: date, limit: int = None):
                 available_at=available_at.isoformat(),
             )
             if snapshot_info:
+                loader.upsert_records(
+                    "normalized_stock_snapshots_daily",
+                    [_to_snapshot_record(snapshot_info, available_at.isoformat())],
+                )
                 enriched_price = _merge_latest_price_record(kis_ohlcv, snapshot_info)
                 if enriched_price:
                     loader.upsert_records("normalized_stock_prices_daily", [enriched_price])
+                else:
+                    try:
+                        existing_price = (
+                            loader.client.table("normalized_stock_prices_daily")
+                            .select("symbol, base_date, open_price, high_price, low_price, close_price, volume, trading_value")
+                            .eq("symbol", symbol)
+                            .eq("base_date", base_date_str)
+                            .limit(1)
+                            .execute()
+                        )
+                        existing_row = (existing_price.data or [None])[0]
+                        if _is_valid_price_row(existing_row):
+                            loader.update_record(
+                                "normalized_stock_prices_daily",
+                                {"symbol": symbol, "base_date": base_date_str},
+                                _price_snapshot_update(snapshot_info, available_at.isoformat()),
+                            )
+                    except Exception as update_exc:
+                        logger.warning(f"Snapshot price-field update skipped for {symbol}: {update_exc}")
 
                 enriched_supply = _merge_latest_supply_record(supply_records, snapshot_info)
                 if enriched_supply:
@@ -792,8 +896,19 @@ async def run_pipeline(target_date: date, limit: int = None):
     await KISBaseCollector.close_session()
     price_rate = quality["price_success"] / max(quality["total_symbols"], 1)
     supply_rate = quality["supply_success"] / max(quality["total_symbols"], 1)
+    price_quality = _fetch_price_quality(loader, target_date.strftime("%Y-%m-%d"))
+    quality["valid_price_rows"] = price_quality["valid_price_rows"]
+    quality["snapshot_only_price_rows"] = price_quality["snapshot_only_rows"]
+    quality["price_null_volume_rows"] = price_quality["null_volume_rows"]
+    quality["price_null_trading_value_rows"] = price_quality["null_trading_value_rows"]
     issues = []
     status = "SUCCESS"
+    if price_quality["snapshot_only_rows"] > 0:
+        status = "FAIL"
+        issues.append(f"snapshot_only_price_rows={price_quality['snapshot_only_rows']}")
+    if price_quality["valid_price_rows"] == 0:
+        status = "FAIL"
+        issues.append("valid_price_rows=0")
     if price_rate < 0.8:
         status = "FAIL"
         issues.append(f"price coverage low: {quality['price_success']}/{quality['total_symbols']}")
@@ -810,6 +925,8 @@ async def run_pipeline(target_date: date, limit: int = None):
     logger.info("=== DATA QUALITY SUMMARY ===")
     for key, value in quality.items():
         logger.info(f"{key}: {value}")
+    for key, value in price_quality.items():
+        logger.info(f"price_quality.{key}: {value}")
     logger.info(f"status: {status}")
     if issues:
         logger.warning("quality_issues: " + "; ".join(issues))

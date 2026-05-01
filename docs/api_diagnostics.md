@@ -46,6 +46,26 @@ python scripts/diagnose_api_sources.py --source kis_ohlcv --symbol 005930 --date
 python scripts/diagnose_api_sources.py --source kis_investor --symbol 058470 --date 20260429 --market auto
 ```
 
+## KIS Market Rankings
+
+Market ranking payloads are stored in `raw_market_rankings` and normalized into
+`normalized_market_rankings_daily`.
+
+```bash
+python scripts/diagnose_api_sources.py --source kis_volume_rank --market J
+python scripts/diagnose_api_sources.py --source kis_volume_rank --market Q
+python scripts/diagnose_api_sources.py --source kis_volume_rank --market T
+```
+
+Check:
+
+- `row_count`
+- `first_row_keys`
+- first row sample fields such as `mksc_shrn_iscd`, `hts_kor_isnm`, `acml_vol`, `acml_tr_pbmn`
+
+If `--market T` returns fewer than 20 ETF rows, StockData falls back to ETF rows
+from the latest valid price table when possible.
+
 ## ECOS
 
 Check today, then recent fallback windows:

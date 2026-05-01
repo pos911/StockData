@@ -16,6 +16,8 @@ DATE_COLUMNS = {
     "normalized_stock_prices_daily": "base_date",
     "normalized_stock_supply_daily": "base_date",
     "normalized_stock_short_selling": "base_date",
+    "normalized_stock_snapshots_daily": "base_date",
+    "normalized_market_rankings_daily": "base_date",
     "normalized_stock_fundamentals_ratios": "base_date",
     "normalized_stock_events_daily": "base_date",
     "normalized_macro_series": "base_date",
@@ -25,6 +27,7 @@ DATE_COLUMNS = {
     "raw_stock_prices_daily": "base_date",
     "raw_stock_supply_daily": "base_date",
     "raw_stock_short_selling": "base_date",
+    "raw_market_rankings": "base_date",
     "raw_ecos_macro_daily": "date",
     "stocks_master": "updated_at",
     "macro_series_master": "updated_at",
@@ -68,6 +71,14 @@ def _symbol_coverage(loader: SupabaseLoader, table: str, target_date: str, activ
     }:
         return None, 0
     rows = loader.fetch_all(table, "base_date", target_date, target_date)
+    if table == "normalized_stock_prices_daily":
+        rows = [
+            row
+            for row in rows
+            if row.get("close_price") not in (None, "")
+            and row.get("volume") not in (None, "")
+            and row.get("trading_value") not in (None, "")
+        ]
     covered = {row["symbol"] for row in rows if row.get("symbol") in active}
     missing = len(active - covered)
     coverage = len(covered) / max(len(active), 1)
@@ -134,6 +145,52 @@ def _macro_series_status(loader: SupabaseLoader, today: date):
         print(f"{series_id:<20} | {latest or 'N/A':<12} | {str(stale):<10} | {status:<12}")
 
 
+def _print_price_quality(loader: SupabaseLoader):
+    print("\n=== PRICE TABLE QUALITY ===")
+    latest = _latest(loader, "normalized_stock_prices_daily", "base_date")
+    if not latest:
+        print("latest_price_date=N/A status=FAIL_NO_VALID_PRICE_ROWS note=no price rows")
+        return
+    rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest, latest)
+    latest_total_rows = len(rows)
+    null_close_rows = sum(1 for row in rows if row.get("close_price") in (None, ""))
+    null_volume_rows = sum(1 for row in rows if row.get("volume") in (None, ""))
+    null_trading_value_rows = sum(1 for row in rows if row.get("trading_value") in (None, ""))
+    snapshot_only_rows = sum(
+        1
+        for row in rows
+        if all(row.get(field) in (None, "") for field in ("open_price", "high_price", "low_price", "close_price", "volume", "trading_value"))
+    )
+    valid_price_rows = sum(
+        1
+        for row in rows
+        if row.get("close_price") not in (None, "")
+        and row.get("volume") not in (None, "")
+        and row.get("trading_value") not in (None, "")
+    )
+    if snapshot_only_rows > 0:
+        status = "FAIL_PRICE_QUALITY"
+    elif valid_price_rows == 0:
+        status = "FAIL_NO_VALID_PRICE_ROWS"
+    elif latest_total_rows and valid_price_rows / latest_total_rows < 0.8:
+        status = "WARN_PRICE_NULL_RATIO"
+    else:
+        status = "SUCCESS"
+    note = (
+        f"null_close={null_close_rows}, null_volume={null_volume_rows}, "
+        f"null_trading_value={null_trading_value_rows}"
+    )
+    print(f"latest_price_date={latest}")
+    print(f"latest_total_rows={latest_total_rows}")
+    print(f"null_close_rows={null_close_rows}")
+    print(f"null_volume_rows={null_volume_rows}")
+    print(f"null_trading_value_rows={null_trading_value_rows}")
+    print(f"snapshot_only_rows={snapshot_only_rows}")
+    print(f"valid_price_rows={valid_price_rows}")
+    print(f"status={status}")
+    print(f"note={note}")
+
+
 def verify_data():
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
@@ -171,6 +228,7 @@ def verify_data():
             row_count = 0
         print(f"{table:<38} | {row_count:<9} | N/A          | 0            | -          | 0        | N/A   | LEGACY             | legacy table; not required")
 
+    _print_price_quality(loader)
     _macro_series_status(loader, today)
 
 

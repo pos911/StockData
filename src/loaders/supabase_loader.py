@@ -10,11 +10,14 @@ TABLE_CONFLICT_KEYS = {
     "raw_stock_prices_daily": ["source", "symbol", "base_date"],
     "raw_stock_supply_daily": ["source", "symbol", "base_date"],
     "raw_stock_short_selling": ["source", "symbol", "base_date"],
+    "raw_market_rankings": ["source", "base_date", "market", "rank_type", "symbol"],
     "raw_macro_series": ["source", "series_id", "base_date"],
     "raw_ecos_macro_daily": ["series_id", "date"],
     "normalized_stock_prices_daily": ["symbol", "base_date"],
     "normalized_stock_supply_daily": ["symbol", "base_date"],
     "normalized_stock_short_selling": ["symbol", "base_date"],
+    "normalized_stock_snapshots_daily": ["symbol", "base_date"],
+    "normalized_market_rankings_daily": ["base_date", "market", "rank_type", "rank", "symbol"],
     "normalized_stock_fundamentals": ["symbol", "base_date"],
     "normalized_stock_fundamentals_ratios": ["symbol", "base_date"],
     "normalized_stock_events_daily": ["symbol", "base_date", "event_type"],
@@ -36,6 +39,21 @@ STRICT_SCHEMA_TABLES = {
     "normalized_macro_series",
     "feature_store_daily",
 }
+
+PRICE_VALUE_FIELDS = ("open_price", "high_price", "low_price", "close_price", "volume", "trading_value")
+PRICE_REQUIRED_FIELDS = ("close_price", "volume", "trading_value")
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _is_snapshot_only_price_record(record: Dict[str, Any]) -> bool:
+    return all(_is_blank(record.get(field)) for field in PRICE_VALUE_FIELDS)
+
+
+def _is_valid_price_record(record: Dict[str, Any]) -> bool:
+    return all(not _is_blank(record.get(field)) for field in PRICE_REQUIRED_FIELDS)
 
 class SupabaseLoader:
     """Supabase DB 데이터 적재기 (아이뎀포턴시 중점)"""
@@ -102,6 +120,33 @@ class SupabaseLoader:
                     raise ValueError(message)
         return valid
 
+    def _validate_table_records(self, table_name: str, records: list, raise_on_error: bool) -> list:
+        if table_name != "normalized_stock_prices_daily":
+            return records
+
+        valid = []
+        skipped = []
+        for record in records:
+            if _is_snapshot_only_price_record(record):
+                skipped.append(("snapshot_only_price_row", record))
+                continue
+            if not _is_valid_price_record(record):
+                skipped.append(("missing_required_price_fields", record))
+                continue
+            valid.append(record)
+
+        if skipped:
+            reason, sample = skipped[0]
+            message = (
+                f"[{table_name}] Blocked {len(skipped)} invalid price records. "
+                f"reason={reason}, symbol={sample.get('symbol')}, base_date={sample.get('base_date')}, "
+                f"sample_record={self._safe_sample(sample)}"
+            )
+            logger.warning(message)
+            if raise_on_error:
+                raise ValueError(message)
+        return valid
+
     @staticmethod
     def _missing_schema_column(error: Exception) -> Optional[str]:
         match = re.search(r"Could not find the '([^']+)' column", str(error))
@@ -132,6 +177,7 @@ class SupabaseLoader:
             on_conflict = ",".join(conflict_keys)
 
         records = self._validate_conflict_keys(table_name, records, conflict_keys, raise_on_error)
+        records = self._validate_table_records(table_name, records, raise_on_error)
         records = self._deduplicate(records, conflict_keys)
         if not records:
             logger.warning(f"[{table_name}] No valid records to upsert after key validation.")
@@ -172,6 +218,25 @@ class SupabaseLoader:
                     raise_on_error=raise_on_error,
                 )
             logger.error(f"Failed to upsert records into {table_name}: {e}")
+            if raise_on_error:
+                raise
+            return False
+
+    def update_record(self, table_name: str, match_fields: Dict[str, Any], update_fields: Dict[str, Any], raise_on_error: bool = False) -> bool:
+        """Update an existing row without using partial upsert, so omitted columns are never inserted as NULL."""
+        try:
+            if not match_fields:
+                raise ValueError("match_fields is required for update_record")
+            if not update_fields:
+                return True
+            query = self.client.table(table_name).update(update_fields)
+            for key, value in match_fields.items():
+                query = query.eq(key, value)
+            query.execute()
+            logger.info(f"[{table_name}] Updated row where {match_fields} with fields={list(update_fields.keys())}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update record in {table_name}: {e}")
             if raise_on_error:
                 raise
             return False

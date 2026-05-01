@@ -30,6 +30,10 @@ SELECT jsonb_pretty(
                         UNION ALL
                         SELECT 'normalized_stock_short_selling', MAX(base_date) FROM normalized_stock_short_selling
                         UNION ALL
+                        SELECT 'normalized_stock_snapshots_daily', MAX(base_date) FROM normalized_stock_snapshots_daily
+                        UNION ALL
+                        SELECT 'normalized_market_rankings_daily', MAX(base_date) FROM normalized_market_rankings_daily
+                        UNION ALL
                         SELECT 'normalized_stock_fundamentals', MAX(base_date) FROM normalized_stock_fundamentals
                         UNION ALL
                         SELECT 'normalized_stock_fundamentals_ratios', MAX(base_date) FROM normalized_stock_fundamentals_ratios
@@ -50,6 +54,8 @@ SELECT jsonb_pretty(
                         UNION ALL
                         SELECT 'raw_stock_short_selling', MAX(base_date) FROM raw_stock_short_selling
                         UNION ALL
+                        SELECT 'raw_market_rankings', MAX(base_date) FROM raw_market_rankings
+                        UNION ALL
                         SELECT 'raw_disclosures', MAX(base_date) FROM raw_disclosures
                     ) freshness_base
                 ) freshness_rows
@@ -63,6 +69,63 @@ SELECT jsonb_pretty(
                 'latest_updated_at', MAX(updated_at)
             )
             FROM stocks_master
+        ),
+        'price_table_quality',
+        (
+            WITH latest_price AS (
+                SELECT MAX(base_date) AS base_date
+                FROM normalized_stock_prices_daily
+            ),
+            latest_rows AS (
+                SELECT *
+                FROM normalized_stock_prices_daily
+                WHERE base_date = (SELECT base_date FROM latest_price)
+            )
+            SELECT jsonb_build_object(
+                'latest_price_date', (SELECT base_date FROM latest_price),
+                'latest_total_rows', COUNT(*),
+                'null_close_rows', COUNT(*) FILTER (WHERE close_price IS NULL),
+                'null_volume_rows', COUNT(*) FILTER (WHERE volume IS NULL),
+                'null_trading_value_rows', COUNT(*) FILTER (WHERE trading_value IS NULL),
+                'snapshot_only_rows', COUNT(*) FILTER (
+                    WHERE close_price IS NULL
+                      AND volume IS NULL
+                      AND trading_value IS NULL
+                      AND open_price IS NULL
+                      AND high_price IS NULL
+                      AND low_price IS NULL
+                ),
+                'valid_price_rows', COUNT(*) FILTER (
+                    WHERE close_price IS NOT NULL
+                      AND volume IS NOT NULL
+                      AND trading_value IS NOT NULL
+                ),
+                'status',
+                    CASE
+                        WHEN COUNT(*) FILTER (
+                            WHERE close_price IS NULL
+                              AND volume IS NULL
+                              AND trading_value IS NULL
+                              AND open_price IS NULL
+                              AND high_price IS NULL
+                              AND low_price IS NULL
+                        ) > 0 THEN 'FAIL_PRICE_QUALITY'
+                        WHEN COUNT(*) FILTER (
+                            WHERE close_price IS NOT NULL
+                              AND volume IS NOT NULL
+                              AND trading_value IS NOT NULL
+                        ) = 0 THEN 'FAIL_NO_VALID_PRICE_ROWS'
+                        WHEN COUNT(*) > 0 AND (
+                            COUNT(*) FILTER (
+                                WHERE close_price IS NOT NULL
+                                  AND volume IS NOT NULL
+                                  AND trading_value IS NOT NULL
+                            )::numeric / COUNT(*)
+                        ) < 0.8 THEN 'WARN_PRICE_NULL_RATIO'
+                        ELSE 'SUCCESS'
+                    END
+            )
+            FROM latest_rows
         ),
         'static_universe_summary',
         (
@@ -213,6 +276,22 @@ SELECT jsonb_pretty(
                 'latest_ratio_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals_ratios)
             )
         ),
+        'ranking_status',
+        (
+            SELECT jsonb_build_object(
+                'latest_ranking_date', (SELECT MAX(base_date) FROM normalized_market_rankings_daily),
+                'latest_normalized_count', (
+                    SELECT COUNT(*)
+                    FROM normalized_market_rankings_daily
+                    WHERE base_date = (SELECT MAX(base_date) FROM normalized_market_rankings_daily)
+                ),
+                'latest_raw_count', (
+                    SELECT COUNT(*)
+                    FROM raw_market_rankings
+                    WHERE base_date = (SELECT MAX(base_date) FROM raw_market_rankings)
+                )
+            )
+        ),
         'sample_stock_rows',
         (
             SELECT jsonb_agg(to_jsonb(x) ORDER BY x.symbol)
@@ -259,6 +338,9 @@ SELECT jsonb_pretty(
                 LEFT JOIN normalized_stock_prices_daily p
                     ON p.symbol = ss.symbol
                    AND p.base_date = (SELECT MAX(base_date) FROM normalized_stock_prices_daily)
+                   AND p.close_price IS NOT NULL
+                   AND p.volume IS NOT NULL
+                   AND p.trading_value IS NOT NULL
                 LEFT JOIN normalized_stock_supply_daily s
                     ON s.symbol = ss.symbol
                    AND s.base_date = (SELECT MAX(base_date) FROM normalized_stock_supply_daily)

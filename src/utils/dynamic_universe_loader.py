@@ -93,6 +93,115 @@ class DynamicUniverseLoader:
         merged["foreign_holding_ratio"] = snapshot.get("foreign_holding_ratio")
         return merged
 
+    @staticmethod
+    def _parse_number(value) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(str(value).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _persist_rankings(self, rows: List[Dict[str, Any]], market: str, rank_type: str, limit: int) -> List[Dict[str, str]]:
+        base_date = get_current_kst().date().isoformat()
+        available_at = get_current_kst().isoformat()
+        raw_records = []
+        normalized_records = []
+        universe_rows = []
+
+        for idx, row in enumerate((rows or [])[:limit], 1):
+            symbol = row.get("mksc_shrn_iscd") or row.get("symbol") or row.get("code")
+            name = row.get("hts_kor_isnm") or row.get("name") or symbol
+            if not symbol:
+                continue
+            volume = self._parse_number(row.get("acml_vol") or row.get("volume"))
+            trading_value = self._parse_number(row.get("acml_tr_pbmn") or row.get("trading_value"))
+            market_cap = self._parse_number(row.get("stck_avls") or row.get("market_cap"))
+            change_rate = self._parse_number(row.get("prdy_ctrt") or row.get("change_rate"))
+            metric_value = {"volume": volume, "trading_value": trading_value, "market_cap": market_cap}.get(rank_type, volume)
+            raw_records.append(
+                {
+                    "source": "KIS",
+                    "base_date": base_date,
+                    "market": market,
+                    "rank_type": rank_type,
+                    "symbol": symbol,
+                    "name": name,
+                    "raw_rank": idx,
+                    "raw_data": json.dumps(row, ensure_ascii=False),
+                    "available_at": available_at,
+                }
+            )
+            normalized_records.append(
+                {
+                    "base_date": base_date,
+                    "market": market,
+                    "rank_type": rank_type,
+                    "rank": idx,
+                    "symbol": symbol,
+                    "name": name,
+                    "volume": volume,
+                    "trading_value": trading_value,
+                    "market_cap": market_cap,
+                    "change_rate": change_rate,
+                    "metric_value": metric_value,
+                    "source": "KIS",
+                    "available_at": available_at,
+                }
+            )
+            universe_rows.append({"code": symbol, "name": name, "market": market})
+
+        if raw_records:
+            self.loader.upsert_records("raw_market_rankings", raw_records)
+        if normalized_records:
+            self.loader.upsert_records("normalized_market_rankings_daily", normalized_records)
+        return universe_rows
+
+    def _fallback_etf_rankings_from_valid_prices(self, limit: int = 20) -> List[Dict[str, str]]:
+        try:
+            latest_res = (
+                self.loader.client.table("normalized_stock_prices_daily")
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if not latest_res.data:
+                return []
+            latest_date = latest_res.data[0]["base_date"]
+            price_res = (
+                self.loader.client.table("normalized_stock_prices_daily")
+                .select("symbol, volume, trading_value, close_price")
+                .eq("base_date", latest_date)
+                .order("volume", desc=True)
+                .limit(500)
+                .execute()
+            )
+            master_res = self.loader.client.table("stocks_master").select("symbol, name, market").eq("market", "ETF").execute()
+            etf_master = {row["symbol"]: row for row in (master_res.data or [])}
+            rows = []
+            for price in price_res.data or []:
+                if price.get("close_price") is None or price.get("volume") is None or price.get("trading_value") is None:
+                    continue
+                stock = etf_master.get(price.get("symbol"))
+                if not stock:
+                    continue
+                rows.append(
+                    {
+                        "mksc_shrn_iscd": price["symbol"],
+                        "hts_kor_isnm": stock.get("name"),
+                        "acml_vol": price.get("volume"),
+                        "acml_tr_pbmn": price.get("trading_value"),
+                    }
+                )
+                if len(rows) >= limit:
+                    break
+            if rows:
+                return self._persist_rankings(rows, "ETF", "volume", limit)
+        except Exception as exc:
+            logger.warning(f"ETF ranking fallback from valid prices failed: {exc}")
+        return []
+
     async def get_combined_universe(self, auto_backfill: bool = True) -> List[Dict[str, Any]]:
         """
         모든 카테고리의 종목을 수집하여 통합된 리스트를 반환합니다.
@@ -261,25 +370,30 @@ class DynamicUniverseLoader:
     async def _load_category_1(self) -> List[Dict[str, str]]:
         """Category 1 (KOSPI Vol Top 30)"""
         res = await self.collector.fetch_volume_rank(market_code='J')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSPI"} for r in res[:30]]
+        return self._persist_rankings(res, "KOSPI", "volume", 30)
 
     async def _load_category_2(self) -> List[Dict[str, str]]:
         """Category 2 (KOSDAQ Vol Top 30)"""
         res = await self.collector.fetch_volume_rank(market_code='Q')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSDAQ"} for r in res[:30]]
+        return self._persist_rankings(res, "KOSDAQ", "volume", 30)
 
     async def _load_category_3(self) -> List[Dict[str, str]]:
         """Category 3 (KOSDAQ Cap Top 30)"""
         res = await self.collector.fetch_market_cap_rank(market_code='Q')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSDAQ"} for r in res[:30]]
+        return self._persist_rankings(res, "KOSDAQ", "market_cap", 30)
 
     async def _load_category_4(self) -> List[Dict[str, str]]:
         """Category 4 (KOSPI 200 Top 50)"""
         # FID_INPUT_ISCD '0001'은 KOSPI 200 인덱스를 의미함
         res = await self.collector.fetch_volume_rank(market_code='J', target_code='0001')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "KOSPI"} for r in res[:50]]
+        return self._persist_rankings(res, "KOSPI200", "volume", 50)
 
     async def _load_category_5(self) -> List[Dict[str, str]]:
         """Category 5 (ETF Leaders): ETF 거래량 상위 20"""
         res = await self.collector.fetch_volume_rank(market_code='T')
-        return [{"code": r["mksc_shrn_iscd"], "name": r["hts_kor_isnm"], "market": "ETF"} for r in res[:20]]
+        if len(res or []) < 20:
+            logger.warning(f"KIS ETF volume rank returned fewer than 20 rows: {len(res or [])}; trying valid-price fallback.")
+            fallback = self._fallback_etf_rankings_from_valid_prices(limit=20)
+            if fallback:
+                return fallback
+        return self._persist_rankings(res, "ETF", "volume", 20)
