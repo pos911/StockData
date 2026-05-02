@@ -42,6 +42,22 @@ STRICT_SCHEMA_TABLES = {
 
 PRICE_VALUE_FIELDS = ("open_price", "high_price", "low_price", "close_price", "volume", "trading_value")
 PRICE_REQUIRED_FIELDS = ("close_price", "volume", "trading_value")
+SYMBOL_TABLES = {
+    "raw_stock_prices_daily",
+    "raw_stock_supply_daily",
+    "raw_stock_short_selling",
+    "normalized_stock_prices_daily",
+    "normalized_stock_supply_daily",
+    "normalized_stock_short_selling",
+    "normalized_stock_snapshots_daily",
+    "normalized_stock_fundamentals",
+    "normalized_stock_fundamentals_ratios",
+    "normalized_stock_events_daily",
+    "stocks_master",
+    "static_stock_universe",
+    "raw_market_rankings",
+    "normalized_market_rankings_daily",
+}
 
 
 def _is_blank(value: Any) -> bool:
@@ -54,6 +70,15 @@ def _is_snapshot_only_price_record(record: Dict[str, Any]) -> bool:
 
 def _is_valid_price_record(record: Dict[str, Any]) -> bool:
     return all(not _is_blank(record.get(field)) for field in PRICE_REQUIRED_FIELDS)
+
+
+def _normalize_symbol_value(symbol: Any) -> str:
+    if symbol is None:
+        return ""
+    text = str(symbol).strip().upper()
+    if text.isdigit():
+        return text.zfill(6)
+    return text
 
 class SupabaseLoader:
     """Supabase DB 데이터 적재기 (아이뎀포턴시 중점)"""
@@ -95,6 +120,20 @@ class SupabaseLoader:
                 sample[key] = value
         return sample
 
+    @staticmethod
+    def _normalize_symbol_records(table_name: str, records: list) -> list:
+        if table_name not in SYMBOL_TABLES:
+            return records
+        normalized = []
+        for record in records:
+            if isinstance(record, dict) and "symbol" in record:
+                copied = dict(record)
+                copied["symbol"] = _normalize_symbol_value(copied.get("symbol"))
+                normalized.append(copied)
+            else:
+                normalized.append(record)
+        return normalized
+
     def _validate_conflict_keys(self, table_name: str, records: list, key_fields: Optional[List[str]], raise_on_error: bool) -> list:
         if not key_fields:
             return records
@@ -121,6 +160,22 @@ class SupabaseLoader:
         return valid
 
     def _validate_table_records(self, table_name: str, records: list, raise_on_error: bool) -> list:
+        if table_name == "normalized_stock_short_selling":
+            suspicious = [
+                record
+                for record in records
+                if (record.get("short_volume") or 0) > 0
+                and (record.get("short_value") or 0) > 0
+                and record.get("short_ratio") in (None, "", 0)
+            ]
+            if suspicious:
+                sample = suspicious[0]
+                logger.warning(
+                    f"[{table_name}] {len(suspicious)} rows have positive short volume/value but missing or zero ratio. "
+                    f"symbol={sample.get('symbol')}, base_date={sample.get('base_date')}"
+                )
+            return records
+
         if table_name != "normalized_stock_prices_daily":
             return records
 
@@ -176,6 +231,7 @@ class SupabaseLoader:
         if on_conflict is None and conflict_keys:
             on_conflict = ",".join(conflict_keys)
 
+        records = self._normalize_symbol_records(table_name, records)
         records = self._validate_conflict_keys(table_name, records, conflict_keys, raise_on_error)
         records = self._validate_table_records(table_name, records, raise_on_error)
         records = self._deduplicate(records, conflict_keys)

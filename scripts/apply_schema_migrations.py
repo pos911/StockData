@@ -38,6 +38,10 @@ MACRO_SERIES_MASTER_COLUMNS = {
     "updated_at": "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP",
 }
 
+MASTER_ASSET_COLUMNS = {
+    "asset_type": "VARCHAR(20) DEFAULT 'STOCK'",
+}
+
 RAW_ECOS_MACRO_DAILY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS raw_ecos_macro_daily (
     source TEXT NOT NULL DEFAULT 'ECOS',
@@ -156,6 +160,20 @@ def apply_schema_migrations() -> None:
         statements.extend(
             f"ALTER TABLE macro_series_master ADD COLUMN IF NOT EXISTS {name} {column_type};"
             for name, column_type in MACRO_SERIES_MASTER_COLUMNS.items()
+        )
+        for table_name in ("stocks_master", "static_stock_universe"):
+            statements.extend(
+                f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {name} {column_type};"
+                for name, column_type in MASTER_ASSET_COLUMNS.items()
+            )
+        statements.extend(
+            [
+                "COMMENT ON COLUMN normalized_stock_supply_daily.foreign_net_buy IS 'Net buy quantity in shares from KIS frgn_ntby_qty, not KRW.';",
+                "COMMENT ON COLUMN normalized_stock_supply_daily.institutional_net_buy IS 'Net buy quantity in shares from KIS orgn_ntby_qty, not KRW.';",
+                "COMMENT ON COLUMN normalized_stock_supply_daily.individual_net_buy IS 'Net buy quantity in shares from KIS prsn_ntby_qty, not KRW.';",
+                "COMMENT ON COLUMN normalized_stock_supply_daily.pension_net_buy IS 'Net buy quantity in shares from KIS pnsn_ntby_qty, not KRW.';",
+                "COMMENT ON COLUMN normalized_stock_supply_daily.corporate_net_buy IS 'Net buy quantity in shares from KIS etc_corp_ntby_qty, not KRW.';",
+            ]
         )
         statements.append(RAW_ECOS_MACRO_DAILY_TABLE_SQL)
         statements.append(RAW_STOCK_SHORT_SELLING_TABLE_SQL)

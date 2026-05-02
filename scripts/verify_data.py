@@ -4,6 +4,7 @@ import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
+import json
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -191,6 +192,95 @@ def _print_price_quality(loader: SupabaseLoader):
     print(f"note={note}")
 
 
+def _raw_price_value(raw_payload: Any, *keys: str) -> Any:
+    if isinstance(raw_payload, str):
+        try:
+            raw_payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            raw_payload = {}
+    if not isinstance(raw_payload, dict):
+        return None
+    candidates = [raw_payload]
+    if isinstance(raw_payload.get("response_row"), dict):
+        candidates.insert(0, raw_payload["response_row"])
+    for payload in candidates:
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _print_price_mapping_quality(loader: SupabaseLoader):
+    print("\n=== RAW/NORMALIZED PRICE FIELD QUALITY ===")
+    raw_latest = _latest(loader, "raw_stock_prices_daily", "base_date")
+    normalized_latest = _latest(loader, "normalized_stock_prices_daily", "base_date")
+    master_market = {}
+    try:
+        master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+        master_market = {row.get("symbol"): row.get("market") for row in master_rows if row.get("symbol")}
+    except Exception as exc:
+        print(f"stocks_master market lookup status=WARN note={exc}")
+
+    if raw_latest:
+        raw_rows = loader.fetch_all("raw_stock_prices_daily", "base_date", raw_latest, raw_latest)
+        print(
+            "raw_stock_prices_daily "
+            f"base_date={raw_latest} total_rows={len(raw_rows)} "
+            f"valid_close_rows={sum(1 for row in raw_rows if _raw_price_value(row.get('raw_data'), 'stck_clpr', 'close_price') not in (None, ''))} "
+            f"valid_volume_rows={sum(1 for row in raw_rows if _raw_price_value(row.get('raw_data'), 'acml_vol', 'volume') not in (None, ''))} "
+            f"valid_trading_value_rows={sum(1 for row in raw_rows if _raw_price_value(row.get('raw_data'), 'acml_tr_pbmn', 'trading_value') not in (None, ''))} "
+            f"market_not_null_rows={sum(1 for row in raw_rows if master_market.get(row.get('symbol')))}"
+        )
+    else:
+        print("raw_stock_prices_daily base_date=N/A status=FAIL_EMPTY")
+
+    if normalized_latest:
+        rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", normalized_latest, normalized_latest)
+        print(
+            "normalized_stock_prices_daily "
+            f"base_date={normalized_latest} total_rows={len(rows)} "
+            f"valid_close_rows={sum(1 for row in rows if row.get('close_price') not in (None, ''))} "
+            f"valid_volume_rows={sum(1 for row in rows if row.get('volume') not in (None, ''))} "
+            f"valid_trading_value_rows={sum(1 for row in rows if row.get('trading_value') not in (None, ''))} "
+            f"market_not_null_rows={sum(1 for row in rows if master_market.get(row.get('symbol')))}"
+        )
+    else:
+        print("normalized_stock_prices_daily base_date=N/A status=FAIL_EMPTY")
+
+
+def _print_ratio_and_short_quality(loader: SupabaseLoader):
+    print("\n=== RATIO / SHORT SELLING QUALITY ===")
+    ratio_latest = _latest(loader, "normalized_stock_fundamentals_ratios", "base_date")
+    if ratio_latest:
+        ratio_rows = loader.fetch_all("normalized_stock_fundamentals_ratios", "base_date", ratio_latest, ratio_latest)
+        total = len(ratio_rows)
+        zero_fields = {
+            field: sum(1 for row in ratio_rows if row.get(field) == 0)
+            for field in ("per", "pbr", "roe", "debt_ratio")
+        }
+        print(f"fundamental_ratios base_date={ratio_latest} total_rows={total} zero_counts={zero_fields}")
+    else:
+        print("fundamental_ratios base_date=N/A status=LEGACY_OR_EMPTY")
+
+    short_latest = _latest(loader, "normalized_stock_short_selling", "base_date")
+    if short_latest:
+        short_rows = loader.fetch_all("normalized_stock_short_selling", "base_date", short_latest, short_latest)
+        suspicious = [
+            row
+            for row in short_rows
+            if (row.get("short_volume") or 0) > 0
+            and (row.get("short_value") or 0) > 0
+            and row.get("short_ratio") in (None, "", 0)
+        ]
+        print(
+            f"short_selling base_date={short_latest} total_rows={len(short_rows)} "
+            f"positive_value_missing_ratio_rows={len(suspicious)}"
+        )
+    else:
+        print("short_selling base_date=N/A status=WARN_EMPTY")
+
+
 def verify_data():
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
@@ -229,6 +319,8 @@ def verify_data():
         print(f"{table:<38} | {row_count:<9} | N/A          | 0            | -          | 0        | N/A   | LEGACY             | legacy table; not required")
 
     _print_price_quality(loader)
+    _print_price_mapping_quality(loader)
+    _print_ratio_and_short_quality(loader)
     _macro_series_status(loader, today)
 
 

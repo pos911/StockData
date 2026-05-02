@@ -19,7 +19,23 @@ _INVESTOR_REQUIRED_KEYS = {
 _DATE_CANDIDATES = ("stck_bsop_date", "bsop_date", "trd_dd", "date", "bas_dt", "stck_dt")
 _SHORT_VOLUME_CANDIDATES = ("ssts_cntg_qty", "ssts_vol", "short_volume", "short_sell_qty")
 _SHORT_VALUE_CANDIDATES = ("ssts_tr_pbmn", "ssts_amt", "short_value", "short_sell_amt")
-_SHORT_RATIO_CANDIDATES = ("short_sell_vol_rate", "short_ratio", "ssts_rate")
+_SHORT_RATIO_CANDIDATES = (
+    "short_sell_vol_rate",
+    "short_ratio",
+    "ssts_rate",
+    "ssts_vol_rlim",
+    "acml_ssts_cntg_qty_rlim",
+    "acml_ssts_tr_pbmn_rlim",
+)
+
+
+def _normalize_symbol_value(symbol: Any) -> str:
+    if symbol is None:
+        return ""
+    text = str(symbol).strip().upper()
+    if text.isdigit():
+        return text.zfill(6)
+    return text
 
 
 def _parse_int(value) -> int:
@@ -38,6 +54,24 @@ def _parse_float(value) -> float:
         return float(str(value).replace(",", "").strip())
     except (ValueError, TypeError):
         return 0.0
+
+
+def _parse_int_nullable(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_float_nullable(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
 
 
 def _normalize_date_value(value: Any) -> str:
@@ -122,6 +156,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return _INVESTOR_REQUIRED_KEYS.issubset(row_keys)
 
     async def _fetch_investor_payload(self, symbol: str):
+        symbol = _normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["investor_trend"]
         attempts = []
 
@@ -156,6 +191,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         end_date: str = "",
         available_at: Optional[str] = None,
     ):
+        symbol = _normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["ohlcv"]
         tr_id = mapping["tr_id"] if timeframe == "D" else "FHKST03010200"
         params = {
@@ -172,48 +208,67 @@ class KISDomesticStockCollector(KISBaseCollector):
             return []
 
         records = []
+        raw_records = []
         previous_market_cap = None
+        now_iso = datetime.now().isoformat()
         for row in data["output2"]:
             base_date = row.get("stck_bsop_date")
             formatted_date = f"{base_date[:4]}-{base_date[4:6]}-{base_date[6:8]}" if base_date else ""
-            close_price = _parse_int(row.get("stck_clpr", 0))
-            listed_shares = _parse_int(row.get("lstn_stcn") or row.get("hts_avls") or 0)
-            market_cap = close_price * listed_shares if listed_shares > 0 else previous_market_cap
+            close_price = _parse_int_nullable(row.get("stck_clpr"))
+            listed_shares = _parse_int_nullable(row.get("lstn_stcn") or row.get("hts_avls"))
+            market_cap = (
+                close_price * listed_shares
+                if close_price is not None and listed_shares is not None and listed_shares > 0
+                else previous_market_cap
+            )
 
             record = {
                 "symbol": symbol,
                 "base_date": formatted_date,
-                "open_price": _parse_int(row.get("stck_oprc", 0)),
-                "high_price": _parse_int(row.get("stck_hgpr", 0)),
-                "low_price": _parse_int(row.get("stck_lwpr", 0)),
+                "open_price": _parse_int_nullable(row.get("stck_oprc")),
+                "high_price": _parse_int_nullable(row.get("stck_hgpr")),
+                "low_price": _parse_int_nullable(row.get("stck_lwpr")),
                 "close_price": close_price,
-                "volume": _parse_int(row.get("acml_vol", 0)),
-                "trading_value": _parse_int(row.get("acml_tr_pbmn", 0)),
+                "volume": _parse_int_nullable(row.get("acml_vol")),
+                "trading_value": _parse_int_nullable(row.get("acml_tr_pbmn")),
                 "market_cap": market_cap,
+                "outstanding_shares": listed_shares,
                 "source": "KIS",
                 "available_at": available_at or datetime.now().isoformat(),
             }
             records.append(record)
+            raw_records.append(
+                {
+                    "source": "KIS",
+                    "symbol": symbol,
+                    "base_date": record["base_date"],
+                    "raw_data": json.dumps(
+                        {
+                            "response_row": row,
+                            "field_mapping": {
+                                "stck_clpr": "close_price",
+                                "acml_vol": "volume",
+                                "acml_tr_pbmn": "trading_value",
+                                "stck_oprc": "open_price",
+                                "stck_hgpr": "high_price",
+                                "stck_lwpr": "low_price",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "collected_at": now_iso,
+                    "available_at": available_at or now_iso,
+                }
+            )
             if market_cap is not None:
                 previous_market_cap = market_cap
-
-        raw_records = [
-            {
-                "source": "KIS",
-                "symbol": symbol,
-                "base_date": record["base_date"],
-                "raw_data": json.dumps(record),
-                "collected_at": datetime.now().isoformat(),
-                "available_at": datetime.now().isoformat(),
-            }
-            for record in records
-        ]
 
         await self.upsert_records("raw_stock_prices_daily", raw_records)
         await self.upsert_records("normalized_stock_prices_daily", records)
         return records
 
     async def fetch_investor_trend(self, symbol: str, available_at: Optional[str] = None):
+        symbol = _normalize_symbol_value(symbol)
         market_div_code, rows = await self._fetch_investor_payload(symbol)
         if not rows:
             return []
@@ -239,6 +294,7 @@ class KISDomesticStockCollector(KISBaseCollector):
                 {
                     "symbol": symbol,
                     "base_date": formatted_date,
+                    # KIS *_ntby_qty fields are net buy quantities in shares.
                     "individual_net_buy": individual,
                     "institutional_net_buy": institutional,
                     "foreign_net_buy": foreign,
@@ -279,6 +335,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return records
 
     async def _fetch_short_selling_payload(self, symbol: str, target_ymd: str, market_code: str):
+        symbol = _normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["short_selling"]
         params = {
             "FID_COND_MRKT_DIV_CODE": market_code,
@@ -296,6 +353,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         market_code: Optional[str] = None,
         available_at: Optional[str] = None,
     ):
+        symbol = _normalize_symbol_value(symbol)
         target_ymd = target_date.strftime("%Y%m%d") if hasattr(target_date, "strftime") else str(target_date).replace("-", "")
         now_iso = datetime.now().isoformat()
         attempts = []
@@ -383,13 +441,23 @@ class KISDomesticStockCollector(KISBaseCollector):
                         f"row_keys={sorted(row.keys())}, output1_keys={sorted(output1.keys())}"
                     )
                     continue
+                short_volume = _parse_int(_first_present(row, _SHORT_VOLUME_CANDIDATES))
+                short_value = _parse_int(_first_present(row, _SHORT_VALUE_CANDIDATES))
+                short_ratio_raw = _first_present(row, _SHORT_RATIO_CANDIDATES, default=None)
+                short_ratio = _parse_float_nullable(short_ratio_raw)
+                if short_ratio is None and (short_volume > 0 or short_value > 0):
+                    logger.warning(
+                        f"Short selling ratio unavailable despite positive volume/value: "
+                        f"symbol={symbol}, base_date={formatted_date}, short_volume={short_volume}, "
+                        f"short_value={short_value}, row_keys={sorted(row.keys())}"
+                    )
                 records.append(
                     {
                         "symbol": symbol,
                         "base_date": formatted_date,
-                        "short_volume": _parse_int(_first_present(row, _SHORT_VOLUME_CANDIDATES)),
-                        "short_value": _parse_int(_first_present(row, _SHORT_VALUE_CANDIDATES)),
-                        "short_ratio": _parse_float(_first_present(row, _SHORT_RATIO_CANDIDATES)),
+                        "short_volume": short_volume,
+                        "short_value": short_value,
+                        "short_ratio": short_ratio,
                         "source": "KIS",
                         "available_at": available_at or now_iso,
                     }
@@ -422,6 +490,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return records
 
     def _fetch_short_selling_pykrx(self, symbol: str, target_ymd: str, available_at: Optional[str] = None):
+        symbol = _normalize_symbol_value(symbol)
         try:
             from pykrx import stock
 
@@ -447,13 +516,22 @@ class KISDomesticStockCollector(KISBaseCollector):
                 row = df.iloc[-1].to_dict()
                 base_date = _normalize_date_value(str(df.index[-1])) or _normalize_date_value(target_ymd)
                 logger.info(f"PYKRX short selling fallback succeeded: symbol={symbol}, function={function_name}")
+                short_volume = _parse_int(
+                    _first_present(row, ("공매도", "수량", "short_volume", "거래량", "short_sell_qty", "volume"))
+                )
+                short_value = _parse_int(
+                    _first_present(row, ("금액", "거래대금", "short_value", "short_sell_amt", "trading_value"))
+                )
+                short_ratio = _parse_float_nullable(
+                    _first_present(row, ("비중", "비중(%)", "short_ratio", "short_sell_vol_rate"), default=None)
+                )
                 return [
                     {
                         "symbol": symbol,
                         "base_date": base_date,
-                        "short_volume": _parse_int(_first_present(row, ("공매도", "수량", "short_volume", "거래량"))),
-                        "short_value": _parse_int(_first_present(row, ("금액", "거래대금", "short_value"))),
-                        "short_ratio": _parse_float(_first_present(row, ("비중", "비중(%)", "short_ratio"))),
+                        "short_volume": short_volume,
+                        "short_value": short_value,
+                        "short_ratio": short_ratio,
                         "source": "PYKRX",
                         "available_at": available_at or datetime.now().isoformat(),
                     }
@@ -489,6 +567,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return data.get("output", []) if data else []
 
     async def fetch_fundamental_info(self, symbol: str, base_date: str, available_at: Optional[str] = None) -> dict:
+        symbol = _normalize_symbol_value(symbol)
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": symbol,

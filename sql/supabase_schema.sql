@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS stocks_master (
     symbol VARCHAR(20) PRIMARY KEY,
     name VARCHAR(100),
     market VARCHAR(20),
+    asset_type VARCHAR(20) DEFAULT 'STOCK',
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -14,6 +15,7 @@ CREATE TABLE IF NOT EXISTS static_stock_universe (
     symbol VARCHAR(20) PRIMARY KEY,
     name VARCHAR(100),
     market VARCHAR(20),
+    asset_type VARCHAR(20) DEFAULT 'STOCK',
     enabled BOOLEAN DEFAULT TRUE,
     source_file TEXT DEFAULT 'config/stock_universe.json',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -237,6 +239,12 @@ CREATE TABLE IF NOT EXISTS normalized_stock_supply_daily (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol, base_date)
 );
+
+COMMENT ON COLUMN normalized_stock_supply_daily.foreign_net_buy IS 'Net buy quantity in shares from KIS frgn_ntby_qty, not KRW.';
+COMMENT ON COLUMN normalized_stock_supply_daily.institutional_net_buy IS 'Net buy quantity in shares from KIS orgn_ntby_qty, not KRW.';
+COMMENT ON COLUMN normalized_stock_supply_daily.individual_net_buy IS 'Net buy quantity in shares from KIS prsn_ntby_qty, not KRW.';
+COMMENT ON COLUMN normalized_stock_supply_daily.pension_net_buy IS 'Net buy quantity in shares from KIS pnsn_ntby_qty, not KRW.';
+COMMENT ON COLUMN normalized_stock_supply_daily.corporate_net_buy IS 'Net buy quantity in shares from KIS etc_corp_ntby_qty, not KRW.';
 
 CREATE TABLE IF NOT EXISTS normalized_stock_short_selling (
     symbol VARCHAR(20),

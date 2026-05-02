@@ -127,6 +127,62 @@ SELECT jsonb_pretty(
             )
             FROM latest_rows
         ),
+        'price_raw_normalized_field_quality',
+        (
+            WITH latest_raw AS (
+                SELECT MAX(base_date) AS base_date
+                FROM raw_stock_prices_daily
+            ),
+            latest_norm AS (
+                SELECT MAX(base_date) AS base_date
+                FROM normalized_stock_prices_daily
+            ),
+            raw_rows AS (
+                SELECT *
+                FROM raw_stock_prices_daily
+                WHERE base_date = (SELECT base_date FROM latest_raw)
+            ),
+            norm_rows AS (
+                SELECT *
+                FROM normalized_stock_prices_daily
+                WHERE base_date = (SELECT base_date FROM latest_norm)
+            )
+            SELECT jsonb_build_object(
+                'raw', (
+                    SELECT jsonb_build_object(
+                        'base_date', (SELECT base_date FROM latest_raw),
+                        'total_rows', COUNT(*),
+                        'valid_close_rows', COUNT(*) FILTER (
+                            WHERE COALESCE(raw_data #>> '{response_row,stck_clpr}', raw_data ->> 'stck_clpr', raw_data ->> 'close_price') IS NOT NULL
+                              AND COALESCE(raw_data #>> '{response_row,stck_clpr}', raw_data ->> 'stck_clpr', raw_data ->> 'close_price') <> ''
+                        ),
+                        'valid_volume_rows', COUNT(*) FILTER (
+                            WHERE COALESCE(raw_data #>> '{response_row,acml_vol}', raw_data ->> 'acml_vol', raw_data ->> 'volume') IS NOT NULL
+                              AND COALESCE(raw_data #>> '{response_row,acml_vol}', raw_data ->> 'acml_vol', raw_data ->> 'volume') <> ''
+                        ),
+                        'valid_trading_value_rows', COUNT(*) FILTER (
+                            WHERE COALESCE(raw_data #>> '{response_row,acml_tr_pbmn}', raw_data ->> 'acml_tr_pbmn', raw_data ->> 'trading_value') IS NOT NULL
+                              AND COALESCE(raw_data #>> '{response_row,acml_tr_pbmn}', raw_data ->> 'acml_tr_pbmn', raw_data ->> 'trading_value') <> ''
+                        ),
+                        'market_not_null_rows', COUNT(*) FILTER (WHERE sm.market IN ('KOSPI', 'KOSDAQ', 'ETF', 'ETN'))
+                    )
+                    FROM raw_rows rr
+                    LEFT JOIN stocks_master sm ON sm.symbol = rr.symbol
+                ),
+                'normalized', (
+                    SELECT jsonb_build_object(
+                        'base_date', (SELECT base_date FROM latest_norm),
+                        'total_rows', COUNT(*),
+                        'valid_close_rows', COUNT(*) FILTER (WHERE close_price IS NOT NULL),
+                        'valid_volume_rows', COUNT(*) FILTER (WHERE volume IS NOT NULL),
+                        'valid_trading_value_rows', COUNT(*) FILTER (WHERE trading_value IS NOT NULL),
+                        'market_not_null_rows', COUNT(*) FILTER (WHERE sm.market IN ('KOSPI', 'KOSDAQ', 'ETF', 'ETN'))
+                    )
+                    FROM norm_rows nr
+                    LEFT JOIN stocks_master sm ON sm.symbol = nr.symbol
+                )
+            )
+        ),
         'static_universe_summary',
         (
             SELECT jsonb_build_object(
@@ -136,7 +192,7 @@ SELECT jsonb_pretty(
                 'symbols', (
                     SELECT jsonb_agg(to_jsonb(x) ORDER BY x.symbol)
                     FROM (
-                        SELECT symbol, name, market, enabled
+                        SELECT symbol, name, market, asset_type, enabled
                         FROM static_stock_universe
                         ORDER BY symbol
                     ) x
@@ -276,6 +332,31 @@ SELECT jsonb_pretty(
                 'latest_ratio_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals_ratios)
             )
         ),
+        'ratio_and_short_quality',
+        (
+            SELECT jsonb_build_object(
+                'latest_ratio_date', (SELECT MAX(base_date) FROM normalized_stock_fundamentals_ratios),
+                'latest_ratio_zero_counts', (
+                    SELECT jsonb_build_object(
+                        'per_zero_rows', COUNT(*) FILTER (WHERE per = 0),
+                        'pbr_zero_rows', COUNT(*) FILTER (WHERE pbr = 0),
+                        'roe_zero_rows', COUNT(*) FILTER (WHERE roe = 0),
+                        'debt_ratio_zero_rows', COUNT(*) FILTER (WHERE debt_ratio = 0)
+                    )
+                    FROM normalized_stock_fundamentals_ratios
+                    WHERE base_date = (SELECT MAX(base_date) FROM normalized_stock_fundamentals_ratios)
+                ),
+                'latest_short_selling_date', (SELECT MAX(base_date) FROM normalized_stock_short_selling),
+                'positive_short_missing_ratio_rows', (
+                    SELECT COUNT(*)
+                    FROM normalized_stock_short_selling
+                    WHERE base_date = (SELECT MAX(base_date) FROM normalized_stock_short_selling)
+                      AND COALESCE(short_volume, 0) > 0
+                      AND COALESCE(short_value, 0) > 0
+                      AND (short_ratio IS NULL OR short_ratio = 0)
+                )
+            )
+        ),
         'ranking_status',
         (
             SELECT jsonb_build_object(
@@ -300,6 +381,7 @@ SELECT jsonb_pretty(
                     ss.symbol,
                     sm.name,
                     sm.market,
+                    sm.asset_type,
                     sm.is_active,
                     p.base_date AS price_date,
                     p.close_price,

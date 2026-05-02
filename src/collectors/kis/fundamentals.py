@@ -6,10 +6,30 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+def _normalize_symbol_value(symbol: Any) -> str:
+    if symbol is None:
+        return ""
+    text = str(symbol).strip().upper()
+    if text.isdigit():
+        return text.zfill(6)
+    return text
+
+
+def _parse_float_nullable(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class KISFundamentalsCollector(KISBaseCollector):
     """기업 펀더멘털 및 재무 지표 수집기"""
 
     async def fetch_financial_statements(self, symbol: str, available_at: Optional[str] = None):
+        symbol = _normalize_symbol_value(symbol)
         """
         대차대조표, 손익계산서 주요 항목 수집 (과거 이력 포함)
         TR_ID: FHKST66430300
@@ -49,6 +69,7 @@ class KISFundamentalsCollector(KISBaseCollector):
         return records
 
     async def fetch_valuation_ratios(self, symbol: str, base_date: Optional[str] = None, available_at: Optional[str] = None):
+        symbol = _normalize_symbol_value(symbol)
         """
         가치평가 및 부채 비율 수집
         TR_ID: FHKST66430600 (안정성), FHKST01010100 (현재가-PER/PBR)
@@ -56,10 +77,10 @@ class KISFundamentalsCollector(KISBaseCollector):
         # 1. PER/PBR 가져오기 (시세 API)
         curr_price_data = await self._request("GET", "/uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100", 
                                            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol})
-        per, pbr = 0.0, 0.0
+        per, pbr = None, None
         if curr_price_data and "output" in curr_price_data:
-            per = float(curr_price_data["output"].get("per", 0) or 0)
-            pbr = float(curr_price_data["output"].get("pbr", 0) or 0)
+            per = _parse_float_nullable(curr_price_data["output"].get("per"))
+            pbr = _parse_float_nullable(curr_price_data["output"].get("pbr"))
 
         # 2. 안정성지표(부채비율 등) 및 ROE 가져오기
         m = KIS_MAPPING["stability_ratio"]
@@ -82,8 +103,8 @@ class KISFundamentalsCollector(KISBaseCollector):
             "base_date": base_date or datetime.now().strftime("%Y-%m-%d"),
             "per": per,
             "pbr": pbr,
-            "roe": float(row.get("self_cptl_ntin_inrt", 0) or 0), 
-            "debt_ratio": float(row.get("lblt_rate", 0) or 0),    
+            "roe": _parse_float_nullable(row.get("self_cptl_ntin_inrt")),
+            "debt_ratio": _parse_float_nullable(row.get("lblt_rate")),
             "source": "KIS",
             "available_at": available_at or datetime.now().isoformat()
         }
@@ -92,6 +113,7 @@ class KISFundamentalsCollector(KISBaseCollector):
         return record
 
     async def fetch_profitability_ratios(self, symbol: str, base_date: Optional[str] = None, available_at: Optional[str] = None):
+        symbol = _normalize_symbol_value(symbol)
         """
         수익성 비율 (ROE 등) - 단독 호출용 또는 보완용
         """
@@ -113,7 +135,7 @@ class KISFundamentalsCollector(KISBaseCollector):
         record = {
             "symbol": symbol,
             "base_date": base_date or datetime.now().strftime("%Y-%m-%d"),
-            "roe": float(row.get("self_cptl_ntin_inrt", 0) or 0),
+            "roe": _parse_float_nullable(row.get("self_cptl_ntin_inrt")),
             "source": "KIS",
             "available_at": available_at or datetime.now().isoformat()
         }

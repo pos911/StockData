@@ -34,9 +34,11 @@ The daily stock pipeline now has two stock scopes:
 Important read rule:
 
 - Use `stocks_master.market IN ('KOSPI', 'KOSDAQ')` to check full market coverage
+- Use `stocks_master.asset_type = 'STOCK'` when ranking ordinary stocks
 - Use `stocks_master.is_active = true` only when the report intentionally wants
   the curated active universe
 - Do not use `is_active = true` to validate full market price coverage
+- Do not mix `asset_type IN ('ETF', 'ETN')` into ordinary KOSPI/KOSDAQ Top lists
 
 ### 3. Configured watchlist and active universe are different
 
@@ -194,6 +196,7 @@ Important columns:
 - `symbol`
 - `name`
 - `market`
+- `asset_type`: `STOCK`, `ETF`, or `ETN`
 - `enabled`
 - `source_file`
 - `updated_at`
@@ -211,6 +214,7 @@ Important columns:
 - `symbol`
 - `name`
 - `market`
+- `asset_type`: `STOCK`, `ETF`, or `ETN`
 - `is_active`
 - `updated_at`
 
@@ -256,6 +260,13 @@ Important columns:
 - `raw_data`
 - `collected_at`
 - `available_at`
+
+Raw-to-normalized price mapping:
+
+- `raw_data.response_row.stck_clpr` -> `normalized_stock_prices_daily.close_price`
+- `raw_data.response_row.acml_vol` -> `normalized_stock_prices_daily.volume`
+- `raw_data.response_row.acml_tr_pbmn` -> `normalized_stock_prices_daily.trading_value`
+- `raw_data.field_mapping` is written for auditability on newly collected KIS price rows
 
 ### `raw_stock_supply_daily`
 
@@ -433,7 +444,7 @@ Important columns:
 
 Interpretation:
 
-- `foreign_net_buy`: same-day foreign net buy
+- `individual_net_buy`, `foreign_net_buy`, `institutional_net_buy`, `pension_net_buy`, and `corporate_net_buy`: same-day net buy quantities in shares from KIS `*_ntby_qty` fields, not KRW amounts
 - `foreign_holding_ratio`: foreign ownership ratio
 
 ### `normalized_stock_short_selling`
@@ -451,6 +462,10 @@ Important columns:
 - `short_ratio`
 - `source`
 - `available_at`
+
+Quality rule:
+
+- `short_ratio` is nullable. If the API provides positive `short_volume` or `short_value` but no usable ratio field, the pipeline stores `NULL` rather than synthetic `0`.
 
 ### `normalized_stock_snapshots_daily`
 
@@ -541,6 +556,11 @@ Important columns:
 - `debt_ratio`
 - `source`
 - `available_at`
+
+Quality rule:
+
+- Missing or failed ratio collection is stored as `NULL`, not synthetic `0`.
+- Large zero counts in `per`, `pbr`, `roe`, or `debt_ratio` are flagged by `scripts/verify_data.py`.
 
 ### `normalized_stock_events_daily`
 

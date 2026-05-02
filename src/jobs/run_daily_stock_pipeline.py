@@ -36,6 +36,7 @@ _NON_COMMON_NAME_PATTERNS = [
 
 _ETF_NAME_MARKERS = ("KODEX", "TIGER", "RISE", "ACE", "PLUS", "SOL", "HANARO", "KOSEF", "TIMEFOLIO", "ETF")
 _ETN_NAME_MARKERS = ("ETN",)
+_STANDARD_MARKETS = {"KOSPI", "KOSDAQ", "ETF", "ETN"}
 
 
 def _normalize_symbol_value(symbol: str) -> str:
@@ -58,11 +59,17 @@ def _prefer_symbol(existing_symbol: str, new_symbol: str) -> str:
 
 
 def _prefer_market(existing_market: str | None, new_market: str | None) -> str | None:
-    if not existing_market:
-        return new_market
-    if existing_market == "DYNAMIC" and new_market:
-        return new_market
-    return existing_market
+    existing = _standardize_market(existing_market)
+    new = _standardize_market(new_market)
+    if existing in {"ETF", "ETN"}:
+        return existing
+    if new in {"ETF", "ETN"}:
+        return new
+    if not existing:
+        return new
+    if existing == "DYNAMIC" and new:
+        return new
+    return existing
 
 
 def _infer_market_from_name(name: str) -> str | None:
@@ -74,6 +81,29 @@ def _infer_market_from_name(name: str) -> str | None:
     if any(marker in upper_name for marker in _ETF_NAME_MARKERS):
         return "ETF"
     return None
+
+
+def _standardize_market(market: str | None, name: str | None = None) -> str | None:
+    inferred = _infer_market_from_name(name or "")
+    if inferred:
+        return inferred
+    if not market:
+        return None
+    value = str(market).strip().upper()
+    if value in _STANDARD_MARKETS:
+        return value
+    if value in {"J", "STOCK", "KS", "KSE", "유가", "유가증권"}:
+        return "KOSPI"
+    if value in {"Q", "KQ", "KOSDAQ GLOBAL", "코스닥"}:
+        return "KOSDAQ"
+    return None
+
+
+def _infer_asset_type(name: str | None, market: str | None) -> str:
+    standardized_market = _standardize_market(market, name)
+    if standardized_market in {"ETF", "ETN"}:
+        return standardized_market
+    return "STOCK"
 
 
 def _should_fetch_fundamentals(name: str) -> bool:
@@ -258,10 +288,13 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
     static_records = []
     enabled_records = []
     for item in data:
+        market = _standardize_market(item.get("market"), item.get("name")) or "KOSPI"
+        asset_type = _infer_asset_type(item.get("name"), market)
         static_record = {
             "symbol": _normalize_symbol_value(item.get("symbol")),
             "name": item.get("name"),
-            "market": item.get("market"),
+            "market": market,
+            "asset_type": asset_type,
             "enabled": bool(item.get("enabled", True)),
             "source_file": path,
             "updated_at": synced_at,
@@ -273,6 +306,7 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
                     "symbol": static_record["symbol"],
                     "name": static_record["name"],
                     "market": static_record["market"],
+                    "asset_type": static_record["asset_type"],
                     "is_active": True,
                     "updated_at": synced_at,
                 }
@@ -341,7 +375,8 @@ def _sync_universe_to_master(
             {
                 "symbol": symbol,
                 "name": stock.get("name") or symbol,
-                "market": stock.get("market") or "DYNAMIC",
+                "market": _standardize_market(stock.get("market"), stock.get("name")) or "KOSPI",
+                "asset_type": _infer_asset_type(stock.get("name"), stock.get("market")),
                 "is_active": True if activate_new else symbol in active_symbols,
                 "updated_at": now_iso,
             }
@@ -386,16 +421,22 @@ async def _collect_full_universe_prices(
                 end_date=base_ymd,
                 available_at=available_at,
             )
-            if not records:
+            valid_records = [record for record in records if _is_valid_price_row(record)]
+            if records and not valid_records:
+                logger.warning(
+                    f"KIS returned only invalid price rows for full-universe symbol {name} ({symbol}); "
+                    "trying KRX fallback."
+                )
+            if not valid_records:
                 fallback = krx_collector.fetch_daily_ohlcv(symbol, target_date)
                 if fallback:
                     fallback["base_date"] = target_date.strftime("%Y-%m-%d")
                     normalized = StockNormalizer.normalize_krx_daily(fallback, target_date)
                     normalized["available_at"] = available_at
                     loader.upsert_records("normalized_stock_prices_daily", [normalized])
-                    records = [normalized]
+                    valid_records = [normalized] if _is_valid_price_row(normalized) else []
 
-            if records:
+            if valid_records:
                 processed += 1
             else:
                 logger.warning(f"No price row collected for full-universe symbol {name} ({symbol})")
@@ -446,12 +487,17 @@ def _refresh_recent_naver_news(
 
 
 def _fetch_price_quality(loader: SupabaseLoader, base_date_str: str) -> dict:
-    fields = "symbol, open_price, high_price, low_price, close_price, volume, trading_value"
     rows = []
+    market_by_symbol = {}
     try:
         rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", base_date_str, base_date_str)
     except Exception as exc:
         logger.warning(f"Failed to fetch price quality rows for {base_date_str}: {exc}")
+    try:
+        master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+        market_by_symbol = {row.get("symbol"): row.get("market") for row in master_rows if row.get("symbol")}
+    except Exception as exc:
+        logger.warning(f"Failed to fetch stocks_master for price market quality: {exc}")
 
     total = len(rows)
     null_close = sum(1 for row in rows if _is_blank(row.get("close_price")))
@@ -459,6 +505,7 @@ def _fetch_price_quality(loader: SupabaseLoader, base_date_str: str) -> dict:
     null_trading = sum(1 for row in rows if _is_blank(row.get("trading_value")))
     snapshot_only = sum(1 for row in rows if _is_snapshot_only_price_row(row))
     valid = sum(1 for row in rows if _is_valid_price_row(row))
+    market_not_null = sum(1 for row in rows if market_by_symbol.get(row.get("symbol")) in _STANDARD_MARKETS)
     return {
         "latest_price_date": base_date_str,
         "latest_total_rows": total,
@@ -467,6 +514,7 @@ def _fetch_price_quality(loader: SupabaseLoader, base_date_str: str) -> dict:
         "null_trading_value_rows": null_trading,
         "snapshot_only_rows": snapshot_only,
         "valid_price_rows": valid,
+        "market_not_null_rows": market_not_null,
     }
 
 
@@ -554,7 +602,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     corp_code_map = opendart_collector.fetch_corp_code_map()
 
     try:
-        res = loader.client.table("stocks_master").select("symbol, name, market").eq("is_active", True).execute()
+        res = loader.client.table("stocks_master").select("symbol, name, market, asset_type").eq("is_active", True).execute()
         active_stocks = res.data if res.data else []
         universe_keys = {_canonical_symbol_key(item["symbol"]) for item in universe}
         for stock in active_stocks:
@@ -564,6 +612,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                         "symbol": stock["symbol"],
                         "name": stock["name"],
                         "market": stock.get("market"),
+                        "asset_type": stock.get("asset_type"),
                         "source_category": "active_master",
                     }
                 )
@@ -594,6 +643,10 @@ async def run_pipeline(target_date: date, limit: int = None):
         else:
             canonical_map[key]["symbol"] = _prefer_symbol(canonical_map[key].get("symbol"), symbol)
             canonical_map[key]["market"] = _prefer_market(canonical_map[key].get("market"), stock.get("market"))
+            canonical_map[key]["asset_type"] = _infer_asset_type(
+                canonical_map[key].get("name") or stock.get("name"),
+                canonical_map[key].get("market"),
+            )
     universe = list(canonical_map.values())
 
     for stock in universe:
@@ -602,22 +655,26 @@ async def run_pipeline(target_date: date, limit: int = None):
         if listing_info:
             stock["name"] = listing_info.get("name") or stock["name"]
             stock["market"] = _prefer_market(stock.get("market"), listing_info.get("market"))
-        stock["market"] = _prefer_market(stock.get("market"), _infer_market_from_name(stock.get("name")))
+        stock["market"] = _standardize_market(_prefer_market(stock.get("market"), _infer_market_from_name(stock.get("name"))), stock.get("name")) or "KOSPI"
+        stock["asset_type"] = _infer_asset_type(stock.get("name"), stock.get("market"))
 
     inferred_market_map = _infer_markets_from_supply_raw(loader, base_date_str)
     for stock in universe:
         inferred_market = inferred_market_map.get(stock["symbol"])
         if inferred_market:
-            stock["market"] = _prefer_market(stock.get("market"), inferred_market)
+            stock["market"] = _standardize_market(_prefer_market(stock.get("market"), inferred_market), stock.get("name")) or stock.get("market")
+            stock["asset_type"] = _infer_asset_type(stock.get("name"), stock.get("market"))
 
     market_updates = []
     for stock in universe:
-        market = stock.get("market") or "DYNAMIC"
+        market = _standardize_market(stock.get("market"), stock.get("name")) or "KOSPI"
+        asset_type = _infer_asset_type(stock.get("name"), market)
         market_updates.append(
             {
                 "symbol": stock["symbol"],
                 "name": stock["name"],
                 "market": market,
+                "asset_type": asset_type,
                 "is_active": True,
                 "updated_at": get_current_kst().isoformat(),
             }
@@ -713,7 +770,15 @@ async def run_pipeline(target_date: date, limit: int = None):
                 logger.warning(f"[Backfill] {symbol} backfill failed (non-fatal): {backfill_exc}")
 
             if symbol not in seen_master:
-                master_buf.append(StockNormalizer.normalize_stock_master(symbol, name, stock.get("market") or "DYNAMIC"))
+                market = _standardize_market(stock.get("market"), name) or "KOSPI"
+                master_buf.append(
+                    StockNormalizer.normalize_stock_master(
+                        symbol,
+                        name,
+                        market,
+                        asset_type=_infer_asset_type(name, market),
+                    )
+                )
                 seen_master.add(symbol)
                 flush_buf(master_buf, "stocks_master")
 
