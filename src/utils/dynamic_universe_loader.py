@@ -55,6 +55,7 @@ class DynamicUniverseLoader:
                         "code": normalize_symbol_value(row["symbol"]),
                         "name": row["name"],
                         "market": _standardize_market(row.get("market")),
+                        "source_category": "static",
                     }
                     for row in rows
                     if row.get("symbol") and row.get("name")
@@ -72,6 +73,7 @@ class DynamicUniverseLoader:
                 "code": normalize_symbol_value(item["symbol"]),
                 "name": item["name"],
                 "market": _standardize_market(item.get("market")),
+                "source_category": "manual",
             }
             for item in items
             if item.get("enabled", True) and item.get("symbol") and item.get("name")
@@ -255,39 +257,28 @@ class DynamicUniverseLoader:
                     "code": symbol,
                     "name": master_row.get("name") or row.get("name") or symbol,
                     "market": master_market or ranking_market,
+                    "source_category": "ranking",
                 }
             )
         return ranked
 
-    def _load_active_master_universe(self, master_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
-        return [
-            {
-                "code": symbol,
-                "name": row.get("name") or symbol,
-                "market": _standardize_market(row.get("market")),
-            }
-            for symbol, row in master_map.items()
-            if row.get("is_active")
-        ]
-
     async def get_combined_universe(self, auto_backfill: bool = True) -> List[Dict[str, Any]]:
         del auto_backfill
-        logger.info("Loading combined universe from static universe, ranking table, and active master.")
+        logger.info("Loading combined universe from static universe and ranking table.")
         master_map = self._load_master_symbol_map()
         static_rows = self._load_static_universe()
         ranked_rows = self._load_latest_ranked_universe(master_map)
-        active_rows = self._load_active_master_universe(master_map)
 
         combined: Dict[str, Dict[str, Any]] = {}
         for category, rows in (
             ("static", static_rows),
             ("ranking", ranked_rows),
-            ("active_master", active_rows),
         ):
             for row in rows:
                 symbol = normalize_symbol_value(row.get("code"))
                 if not symbol:
                     continue
+                source_category = row.get("source_category") or category
                 existing = combined.setdefault(
                     symbol,
                     {
@@ -300,7 +291,7 @@ class DynamicUniverseLoader:
                 existing["name"] = existing.get("name") or row.get("name") or symbol
                 if not existing.get("market"):
                     existing["market"] = _standardize_market(row.get("market"))
-                existing["sources"].add(category)
+                existing["sources"].add(source_category)
 
         final_universe = [
             {

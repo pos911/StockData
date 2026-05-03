@@ -603,6 +603,54 @@ def _should_skip_full_universe_price_ingestion(valid_stock_rows: int) -> bool:
     return valid_stock_rows >= 2000
 
 
+def _count_active_master_symbols(loader: SupabaseLoader) -> int:
+    try:
+        res = loader.client.table("stocks_master").select("symbol", count="exact").eq("is_active", True).limit(1).execute()
+        return int(res.count or 0)
+    except Exception as exc:
+        logger.warning(f"Failed to count active stocks_master rows: {exc}")
+        return 0
+
+
+def _detail_universe_source_counts(universe: list[dict]) -> dict[str, int]:
+    counts = {"static": 0, "manual": 0, "ranking": 0}
+    for stock in universe:
+        source_text = str(stock.get("source_category") or "")
+        parts = {part.strip() for part in source_text.split(",") if part.strip()}
+        for key in counts:
+            if key in parts:
+                counts[key] += 1
+    return counts
+
+
+def _enforce_detail_universe_guardrail(
+    universe: list[dict],
+    limit: int | None,
+    active_master_count: int,
+    max_universe_size: int = 500,
+) -> list[dict]:
+    if limit is not None or len(universe) <= max_universe_size:
+        return universe
+
+    counts = _detail_universe_source_counts(universe)
+    logger.error(
+        "Detail universe exceeded guardrail; truncating to safe size. "
+        f"static_count={counts['static']}, ranking_count={counts['ranking']}, "
+        f"active_master_count={active_master_count}, final_universe_count={len(universe)}"
+    )
+
+    def _priority(stock: dict) -> tuple[int, str]:
+        source_text = str(stock.get("source_category") or "")
+        parts = {part.strip() for part in source_text.split(",") if part.strip()}
+        if "static" in parts or "manual" in parts:
+            return (0, stock.get("symbol", ""))
+        if "ranking" in parts:
+            return (1, stock.get("symbol", ""))
+        return (2, stock.get("symbol", ""))
+
+    return sorted(universe, key=_priority)[:max_universe_size]
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
@@ -640,6 +688,7 @@ async def run_pipeline(target_date: date, limit: int = None):
         )
 
     universe = await universe_loader.get_combined_universe(auto_backfill=limit is None)
+    active_master_count = _count_active_master_symbols(loader)
     market_classification_map = krx_collector.fetch_market_classification_map()
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))
     naver_news_enabled = _is_naver_news_ingestion_enabled(config)
@@ -653,25 +702,6 @@ async def run_pipeline(target_date: date, limit: int = None):
         logger.info("Naver news ingestion is disabled by configuration.")
 
     corp_code_map = opendart_collector.fetch_corp_code_map()
-
-    try:
-        res = loader.client.table("stocks_master").select("symbol, name, market, asset_type").eq("is_active", True).execute()
-        active_stocks = res.data if res.data else []
-        universe_keys = {canonical_symbol_key(item["symbol"]) for item in universe}
-        for stock in active_stocks:
-            if canonical_symbol_key(stock["symbol"]) not in universe_keys:
-                universe.append(
-                    {
-                        "symbol": stock["symbol"],
-                        "name": stock["name"],
-                        "market": stock.get("market"),
-                        "asset_type": stock.get("asset_type"),
-                        "source_category": "active_master",
-                    }
-                )
-                logger.info(f"Added manual active stock from DB: {stock['name']} ({stock['symbol']})")
-    except Exception as exc:
-        logger.error(f"Failed to load active stocks from master: {exc}")
 
     timestamp_now = get_current_kst()
     total_processed = 0
@@ -718,11 +748,18 @@ async def run_pipeline(target_date: date, limit: int = None):
             stock["market"] = _standardize_market(_prefer_market(stock.get("market"), inferred_market), stock.get("name")) or stock.get("market")
             stock["asset_type"] = _infer_asset_type(stock.get("name"), stock.get("market"))
 
+    universe = _enforce_detail_universe_guardrail(universe, limit, active_master_count)
+
     if limit:
         logger.info(f"Limiting execution to first {limit} symbols for verification.")
         universe = universe[:limit]
 
-    logger.info(f"Universe after dedup: {len(universe)} symbols")
+    source_counts = _detail_universe_source_counts(universe)
+    logger.info(
+        f"Universe after dedup: {len(universe)} symbols "
+        f"(static={source_counts['static']}, manual={source_counts['manual']}, "
+        f"ranking={source_counts['ranking']}, active_master_count={active_master_count})"
+    )
     quality["total_symbols"] = len(universe)
 
     price_buf = []

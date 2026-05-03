@@ -27,18 +27,56 @@ def _raw_price_record(row: dict, target_date: date) -> dict:
     }
 
 
-def _master_record(symbol: str, name: str, market: str, asset_type: str) -> dict:
+def _master_record(
+    symbol: str,
+    name: str,
+    market: str,
+    asset_type: str,
+    existing_active_map: dict[str, bool],
+    protected_symbols: set[str],
+) -> dict:
+    normalized_symbol = normalize_symbol_value(symbol)
+    if normalized_symbol in protected_symbols:
+        is_active = True
+    elif normalized_symbol in existing_active_map:
+        is_active = bool(existing_active_map[normalized_symbol])
+    else:
+        is_active = False
     return {
-        "symbol": normalize_symbol_value(symbol),
+        "symbol": normalized_symbol,
         "name": name,
         "market": market,
         "asset_type": asset_type,
-        "is_active": True,
+        "is_active": is_active,
         "updated_at": get_current_kst().isoformat(),
     }
 
 
-def _collect_krx_stock_master(krx: KRXCollector, target_date: date) -> list[dict]:
+def _load_existing_active_map(loader: SupabaseLoader) -> dict[str, bool]:
+    try:
+        rows = (
+            loader.client.table("stocks_master")
+            .select("symbol, is_active")
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to load existing stocks_master active map: {exc}")
+        return {}
+    return {
+        normalize_symbol_value(row.get("symbol")): bool(row.get("is_active"))
+        for row in rows
+        if row.get("symbol")
+    }
+
+
+def _collect_krx_stock_master(
+    krx: KRXCollector,
+    target_date: date,
+    existing_active_map: dict[str, bool],
+    protected_symbols: set[str],
+) -> list[dict]:
     rows = krx.fetch_kind_listings()
     if len(rows) < 1500:
         logger.warning(f"KRX KIND listing count too small ({len(rows)}); falling back to FDR.")
@@ -55,11 +93,28 @@ def _collect_krx_stock_master(krx: KRXCollector, target_date: date) -> list[dict
         symbol = normalize_symbol_value(row.get("code"))
         if not symbol:
             continue
-        master_rows.append(_master_record(symbol, row.get("name") or symbol, market, "STOCK"))
+        master_rows.append(
+            _master_record(
+                symbol,
+                row.get("name") or symbol,
+                market,
+                "STOCK",
+                existing_active_map,
+                protected_symbols,
+            )
+        )
     return master_rows
 
 
-def _collect_krx_etp_master_and_prices(krx: KRXCollector, target_date: date, market: str, asset_type: str, rows: list[dict]):
+def _collect_krx_etp_master_and_prices(
+    krx: KRXCollector,
+    target_date: date,
+    market: str,
+    asset_type: str,
+    rows: list[dict],
+    existing_active_map: dict[str, bool],
+    protected_symbols: set[str],
+):
     master_rows = []
     raw_price_rows = []
     normalized_price_rows = []
@@ -68,7 +123,16 @@ def _collect_krx_etp_master_and_prices(krx: KRXCollector, target_date: date, mar
         symbol = normalized.get("symbol")
         if not symbol:
             continue
-        master_rows.append(_master_record(symbol, normalized.get("name") or symbol, market, asset_type))
+        master_rows.append(
+            _master_record(
+                symbol,
+                normalized.get("name") or symbol,
+                market,
+                asset_type,
+                existing_active_map,
+                protected_symbols,
+            )
+        )
         raw_price_rows.append(_raw_price_record(normalized, target_date))
         if normalized.get("close_price") is not None:
             normalized_price_rows.append(
@@ -143,16 +207,18 @@ def run_pipeline(target_date: date) -> None:
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     krx = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
+    protected_symbols = _load_static_enabled_symbols(loader)
+    existing_active_map = _load_existing_active_map(loader)
 
-    stock_master_rows = _collect_krx_stock_master(krx, target_date)
+    stock_master_rows = _collect_krx_stock_master(krx, target_date, existing_active_map, protected_symbols)
     etf_rows = krx.fetch_etf_daily_trading(target_date)
     etn_rows = krx.fetch_etn_daily_trading(target_date)
 
     etf_master_rows, etf_raw_prices, etf_normalized_prices = _collect_krx_etp_master_and_prices(
-        krx, target_date, "ETF", "ETF", etf_rows
+        krx, target_date, "ETF", "ETF", etf_rows, existing_active_map, protected_symbols
     )
     etn_master_rows, etn_raw_prices, etn_normalized_prices = _collect_krx_etp_master_and_prices(
-        krx, target_date, "ETN", "ETN", etn_rows
+        krx, target_date, "ETN", "ETN", etn_rows, existing_active_map, protected_symbols
     )
 
     all_master_rows = stock_master_rows + etf_master_rows + etn_master_rows
@@ -178,7 +244,6 @@ def run_pipeline(target_date: date) -> None:
     if etn_normalized_prices:
         loader.upsert_records("normalized_stock_prices_daily", etn_normalized_prices)
 
-    protected_symbols = _load_static_enabled_symbols(loader)
     current_symbols = {row["symbol"] for row in master_rows}
     deactivated_count = _deactivate_missing_master_rows(loader, current_symbols, protected_symbols)
 

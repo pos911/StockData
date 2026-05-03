@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import date
 from pathlib import Path
@@ -9,6 +10,7 @@ import json
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.loaders.supabase_loader import SupabaseLoader
+from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 from src.utils.config_loader import load_config
 from src.utils.time_utils import get_current_kst
 from src.utils.symbols import is_q_prefixed_numeric_symbol, normalize_symbol_value
@@ -502,6 +504,72 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
         print("status=SUCCESS")
 
 
+def _print_stock_detail_universe_quality(config: dict, loader: SupabaseLoader):
+    print("\n=== STOCK DETAIL UNIVERSE QUALITY ===")
+    static_count = 0
+    ranking_count = 0
+    active_master_count = 0
+    detail_universe_count = 0
+    try:
+        static_rows = (
+            loader.client.table("static_stock_universe")
+            .select("symbol", count="exact")
+            .eq("enabled", True)
+            .limit(1)
+            .execute()
+        )
+        static_count = int(static_rows.count or 0)
+    except Exception as exc:
+        print(f"static enabled count=ERROR note={exc}")
+    try:
+        latest = _latest(loader, "normalized_market_rankings_daily", "base_date")
+        if latest:
+            ranking_rows = (
+                loader.client.table("normalized_market_rankings_daily")
+                .select("symbol")
+                .eq("base_date", latest)
+                .execute()
+                .data
+                or []
+            )
+            ranking_count = len({normalize_symbol_value(row.get("symbol")) for row in ranking_rows if row.get("symbol")})
+    except Exception as exc:
+        print(f"latest ranking symbol count=ERROR note={exc}")
+    try:
+        active_rows = (
+            loader.client.table("stocks_master")
+            .select("symbol", count="exact")
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        active_master_count = int(active_rows.count or 0)
+    except Exception as exc:
+        print(f"stocks_master active count=ERROR note={exc}")
+
+    try:
+        universe_loader = DynamicUniverseLoader(config, collector=None)
+        universe = asyncio.run(universe_loader.get_combined_universe(auto_backfill=False))
+        detail_universe_count = len(universe)
+    except Exception as exc:
+        print(f"expected detail universe count=ERROR note={exc}")
+        universe = []
+
+    print(f"static enabled count={static_count}")
+    print(f"latest ranking symbol count={ranking_count}")
+    print(f"stocks_master active count={active_master_count}")
+    print(f"expected detail universe count={detail_universe_count}")
+
+    if detail_universe_count > 500:
+        print("status=FAIL_DETAIL_UNIVERSE_TOO_LARGE")
+    elif active_master_count > 1000:
+        print("status=WARN_MASTER_ACTIVE_TOO_BROAD")
+    elif ranking_count == 0:
+        print("status=WARN_RANKING_UNIVERSE_EMPTY")
+    else:
+        print("status=SUCCESS")
+
+
 def verify_data():
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
@@ -546,6 +614,7 @@ def verify_data():
     _print_market_ranking_quality(loader)
     _print_market_master_quality(loader)
     _print_ranking_source_quality(loader, today)
+    _print_stock_detail_universe_quality(config, loader)
     _macro_series_status(loader, today)
 
 

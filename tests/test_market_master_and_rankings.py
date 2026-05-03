@@ -5,7 +5,10 @@ import pytest
 from src.collectors.krx_collector import KRXCollector
 from src.jobs.run_daily_master_pipeline import _master_record
 from src.jobs.run_daily_ranking_pipeline import _filter_kis_volume_rows, _persist_rankings
-from src.jobs.run_daily_stock_pipeline import _should_skip_full_universe_price_ingestion
+from src.jobs.run_daily_stock_pipeline import (
+    _enforce_detail_universe_guardrail,
+    _should_skip_full_universe_price_ingestion,
+)
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 
 
@@ -123,14 +126,29 @@ def test_persist_rankings_deletes_same_source_combo_and_reassigns_rank():
 
 
 def test_master_record_has_no_rank_field():
-    record = _master_record("005930", "Samsung", "KOSPI", "STOCK")
+    record = _master_record("005930", "Samsung", "KOSPI", "STOCK", {}, set())
     assert "rank" not in record
+
+
+def test_new_master_symbol_defaults_to_inactive():
+    record = _master_record("005930", "Samsung", "KOSPI", "STOCK", {}, set())
+    assert record["is_active"] is False
+
+
+def test_existing_active_symbol_is_preserved():
+    record = _master_record("005930", "Samsung", "KOSPI", "STOCK", {"005930": True}, set())
+    assert record["is_active"] is True
+
+
+def test_static_enabled_symbol_is_protected():
+    record = _master_record("005930", "Samsung", "KOSPI", "STOCK", {"005930": False}, {"005930"})
+    assert record["is_active"] is True
 
 
 @pytest.mark.asyncio
 async def test_dynamic_universe_loader_uses_ranking_table_without_kis_calls():
     loader = DynamicUniverseLoader.__new__(DynamicUniverseLoader)
-    loader.static_universe_path = "config/stock_universe.json"
+    loader.static_universe_path = "config/__missing_stock_universe__.json"
 
     class NoKISCollector:
         async def fetch_volume_rank(self, *args, **kwargs):
@@ -166,6 +184,7 @@ async def test_dynamic_universe_loader_uses_ranking_table_without_kis_calls():
             if name == "stocks_master":
                 return Query([
                     {"symbol": "005930", "name": "Samsung", "market": "KOSPI", "asset_type": "STOCK", "is_active": True},
+                    {"symbol": "000660", "name": "SK hynix", "market": "KOSPI", "asset_type": "STOCK", "is_active": True},
                 ])
             if name == "normalized_market_rankings_daily":
                 return Query([
@@ -183,6 +202,83 @@ async def test_dynamic_universe_loader_uses_ranking_table_without_kis_calls():
     loader.loader = FakeSupabaseLoader()
     universe = await loader.get_combined_universe(auto_backfill=False)
     assert any(row["symbol"] == "005930" for row in universe)
+    assert all(row["symbol"] != "000660" for row in universe)
+    assert all("active_master" not in row.get("source_category", "") for row in universe)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_universe_loader_prefers_static_and_ranking_only():
+    loader = DynamicUniverseLoader.__new__(DynamicUniverseLoader)
+    loader.static_universe_path = "config/__missing_stock_universe__.json"
+    loader.collector = None
+
+    class TableResult:
+        def __init__(self, data):
+            self.data = data
+
+    class Query:
+        def __init__(self, data):
+            self.data = data
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            return TableResult(self.data)
+
+    class Client:
+        def table(self, name):
+            if name == "stocks_master":
+                return Query(
+                    [
+                        {"symbol": "005930", "name": "Samsung", "market": "KOSPI", "asset_type": "STOCK", "is_active": False},
+                        {"symbol": "000660", "name": "SK hynix", "market": "KOSPI", "asset_type": "STOCK", "is_active": True},
+                        {"symbol": "058470", "name": "Leeno", "market": "KOSDAQ", "asset_type": "STOCK", "is_active": False},
+                    ]
+                )
+            if name == "normalized_market_rankings_daily":
+                return Query(
+                    [
+                        {"base_date": "2026-05-03"},
+                        {"symbol": "005930", "name": "Samsung", "market": "KOSPI", "rank_type": "volume"},
+                    ]
+                )
+            if name == "static_stock_universe":
+                return Query([{"symbol": "058470", "name": "Leeno", "market": "KOSDAQ"}])
+            return Query([])
+
+    class FakeSupabaseLoader:
+        def __init__(self):
+            self.client = Client()
+
+    loader.loader = FakeSupabaseLoader()
+    universe = await loader.get_combined_universe(auto_backfill=False)
+    symbols = {row["symbol"] for row in universe}
+    assert symbols == {"005930", "058470"}
+    by_symbol = {row["symbol"]: row for row in universe}
+    assert by_symbol["005930"]["source_category"] == "ranking"
+    assert by_symbol["058470"]["source_category"] == "static"
+
+
+def test_detail_universe_guardrail_truncates_when_too_large():
+    universe = [{"symbol": f"{i:06d}", "source_category": "ranking"} for i in range(600)]
+    trimmed = _enforce_detail_universe_guardrail(universe, None, active_master_count=2400)
+    assert len(trimmed) == 500
+
+
+def test_detail_universe_guardrail_keeps_limit_override():
+    universe = [{"symbol": f"{i:06d}", "source_category": "ranking"} for i in range(600)]
+    trimmed = _enforce_detail_universe_guardrail(universe, 50, active_master_count=2400)
+    assert len(trimmed) == 600
 
 
 def test_full_universe_price_ingestion_guardrail_skip():
