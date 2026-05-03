@@ -10,6 +10,7 @@ from src.utils.logger import get_logger
 from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
+from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
 
@@ -25,7 +26,9 @@ class FeatureGenerator:
     def _deduplicate_feature_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         deduped = {}
         for record in records:
-            key = (record.get("symbol"), record.get("base_date"), record.get("feature_name"))
+            normalized_symbol = normalize_symbol_value(record.get("symbol"))
+            record["symbol"] = normalized_symbol
+            key = (normalized_symbol, record.get("base_date"), record.get("feature_name"))
             if any(value in (None, "") for value in key):
                 continue
             value = record.get("feature_value")
@@ -37,7 +40,7 @@ class FeatureGenerator:
     def generate_features_for_date(self, target_date: date) -> int:
         # 1. 대상 종목 리스트 (Universe) 가져오기
         universe = self._load_universe()
-        enabled_symbols = [s["symbol"] for s in universe]
+        enabled_symbols = [normalize_symbol_value(s["symbol"]) for s in universe]
         
         if not enabled_symbols:
             logger.warning("No enabled symbols found in universe.")
@@ -387,6 +390,8 @@ class FeatureGenerator:
                                          desc=True)
             
             df = pd.DataFrame(data)
+            if not df.empty and "symbol" in df.columns:
+                df["symbol"] = df["symbol"].map(normalize_symbol_value)
             logger.info(f"Loaded {len(df)} rows from {table_name}")
             return df
         except Exception as e:
@@ -397,6 +402,8 @@ class FeatureGenerator:
         try:
             res = self.loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
             if res.data:
+                for row in res.data:
+                    row["symbol"] = normalize_symbol_value(row.get("symbol"))
                 return res.data
             else:
                 logger.warning("No active stocks found in stocks_master.")

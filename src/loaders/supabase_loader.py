@@ -3,6 +3,7 @@ import re
 from typing import List, Dict, Any, Optional
 from supabase import create_client, Client
 from src.utils.logger import get_logger
+from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
 
@@ -53,6 +54,7 @@ SYMBOL_TABLES = {
     "normalized_stock_fundamentals",
     "normalized_stock_fundamentals_ratios",
     "normalized_stock_events_daily",
+    "feature_store_daily",
     "stocks_master",
     "static_stock_universe",
     "raw_market_rankings",
@@ -70,15 +72,6 @@ def _is_snapshot_only_price_record(record: Dict[str, Any]) -> bool:
 
 def _is_valid_price_record(record: Dict[str, Any]) -> bool:
     return all(not _is_blank(record.get(field)) for field in PRICE_REQUIRED_FIELDS)
-
-
-def _normalize_symbol_value(symbol: Any) -> str:
-    if symbol is None:
-        return ""
-    text = str(symbol).strip().upper()
-    if text.isdigit():
-        return text.zfill(6)
-    return text
 
 class SupabaseLoader:
     """Supabase DB 데이터 적재기 (아이뎀포턴시 중점)"""
@@ -128,7 +121,7 @@ class SupabaseLoader:
         for record in records:
             if isinstance(record, dict) and "symbol" in record:
                 copied = dict(record)
-                copied["symbol"] = _normalize_symbol_value(copied.get("symbol"))
+                copied["symbol"] = normalize_symbol_value(copied.get("symbol"))
                 normalized.append(copied)
             else:
                 normalized.append(record)

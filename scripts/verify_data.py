@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 from src.utils.time_utils import get_current_kst
+from src.utils.symbols import is_q_prefixed_numeric_symbol, normalize_symbol_value
 
 
 DATE_COLUMNS = {
@@ -36,6 +37,41 @@ DATE_COLUMNS = {
 
 LEGACY_TABLES = {"normalized_stock_fundamentals"}
 CORE_MACRO_SERIES = ["KR_GOVT_10Y", "KR_GOVT_3Y", "USDKRW", "KR_CD_91D", "KR_CORP_AA_3Y"]
+SYMBOL_QUALITY_TABLES = [
+    "feature_store_daily",
+    "normalized_stock_prices_daily",
+    "raw_stock_prices_daily",
+    "normalized_stock_supply_daily",
+    "raw_stock_supply_daily",
+    "normalized_stock_short_selling",
+    "normalized_stock_snapshots_daily",
+    "normalized_market_rankings_daily",
+    "raw_market_rankings",
+]
+EXPECTED_RANKINGS = {
+    ("KOSPI", "volume"),
+    ("KOSPI", "trading_value"),
+    ("KOSDAQ", "volume"),
+    ("KOSDAQ", "trading_value"),
+    ("KOSDAQ", "market_cap"),
+    ("ETF", "volume"),
+    ("ETF", "trading_value"),
+}
+
+
+def _standardize_market_value(market: str | None) -> str | None:
+    if not market:
+        return None
+    value = str(market).strip().upper()
+    if value in {"KOSPI", "KOSDAQ", "ETF", "ETN", "KOSPI200"}:
+        return value
+    if value in {"J", "STOCK", "KS", "KSE"}:
+        return "KOSPI"
+    if value in {"Q", "KQ"}:
+        return "KOSDAQ"
+    if value == "T":
+        return "ETF"
+    return value
 
 
 def _count(loader: SupabaseLoader, table: str) -> int:
@@ -281,6 +317,95 @@ def _print_ratio_and_short_quality(loader: SupabaseLoader):
         print("short_selling base_date=N/A status=WARN_EMPTY")
 
 
+def _fetch_symbols_for_table(loader: SupabaseLoader, table_name: str) -> list[str]:
+    try:
+        rows = loader.client.table(table_name).select("symbol").limit(5000).execute().data or []
+        return [row.get("symbol") for row in rows if row.get("symbol")]
+    except Exception as exc:
+        print(f"{table_name} symbol scan failed: {exc}")
+        return []
+
+
+def _print_symbol_quality(loader: SupabaseLoader):
+    print("\n=== SYMBOL QUALITY ===")
+    q_prefix_rows_by_table = {}
+    q_prefix_samples = {}
+    duplicate_candidates = set()
+
+    for table_name in SYMBOL_QUALITY_TABLES:
+        symbols = _fetch_symbols_for_table(loader, table_name)
+        q_rows = [symbol for symbol in symbols if is_q_prefixed_numeric_symbol(symbol)]
+        q_symbols = sorted(set(q_rows))
+        q_prefix_rows_by_table[table_name] = len(q_rows)
+        q_prefix_samples[table_name] = q_symbols[:5]
+        symbol_set = set(symbols)
+        for q_symbol in q_symbols:
+            canonical = normalize_symbol_value(q_symbol)
+            if canonical in symbol_set:
+                duplicate_candidates.add(f"{canonical} / {q_symbol}")
+
+    status = "FAIL_SYMBOL_NORMALIZATION" if any(count > 0 for count in q_prefix_rows_by_table.values()) else "SUCCESS"
+    print(f"q_prefix_rows_by_table={q_prefix_rows_by_table}")
+    print(f"canonical_duplicate_candidates={sorted(duplicate_candidates)}")
+    print(f"q_prefix_samples={q_prefix_samples}")
+    print(f"status={status}")
+
+
+def _print_market_ranking_quality(loader: SupabaseLoader):
+    print("\n=== MARKET RANKING QUALITY ===")
+    latest = _latest(loader, "normalized_market_rankings_daily", "base_date")
+    if not latest:
+        print("status=FAIL_RANKING_EMPTY note=no ranking rows")
+        return
+
+    ranking_rows = loader.fetch_all("normalized_market_rankings_daily", "base_date", latest, latest)
+    master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+    master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+    combos = {(row.get("market"), row.get("rank_type")) for row in ranking_rows}
+    missing_expected_rankings = sorted(f"{market}:{rank_type}" for market, rank_type in EXPECTED_RANKINGS if (market, rank_type) not in combos)
+
+    summary = {}
+    for row in ranking_rows:
+        key = (row.get("market"), row.get("rank_type"))
+        bucket = summary.setdefault(
+            key,
+            {"row_count": 0, "no_master_rows": 0, "market_mismatch_rows": 0, "q_prefix_rows": 0},
+        )
+        bucket["row_count"] += 1
+        symbol = row.get("symbol")
+        if is_q_prefixed_numeric_symbol(symbol):
+            bucket["q_prefix_rows"] += 1
+        master = master_map.get(symbol)
+        if not master:
+            bucket["no_master_rows"] += 1
+            continue
+        ranking_market = _standardize_market_value(row.get("market"))
+        master_market = _standardize_market_value(master.get("market"))
+        if ranking_market != "KOSPI200" and master_market != ranking_market:
+            bucket["market_mismatch_rows"] += 1
+
+    for (market, rank_type), stats in sorted(summary.items()):
+        print(
+            f"ranking_market={market} rank_type={rank_type} row_count={stats['row_count']} "
+            f"no_master_rows={stats['no_master_rows']} market_mismatch_rows={stats['market_mismatch_rows']} "
+            f"q_prefix_rows={stats['q_prefix_rows']}"
+        )
+    print(f"missing_expected_rankings={missing_expected_rankings}")
+
+    if any(stats["q_prefix_rows"] > 0 for stats in summary.values()):
+        print("status=FAIL_SYMBOL_NORMALIZATION")
+    elif any(stats["market_mismatch_rows"] > 0 for (market, _), stats in summary.items() if market == "KOSPI"):
+        print("status=FAIL_RANKING_MARKET_MISMATCH")
+    elif ("KOSDAQ", "volume") not in combos:
+        print("status=FAIL_RANKING_KOSDAQ")
+    elif ("KOSDAQ", "trading_value") not in combos:
+        print("status=WARN_RANKING_KOSDAQ_TRADING_VALUE")
+    elif ("ETF", "trading_value") not in combos:
+        print("status=WARN_RANKING_ETF_TRADING_VALUE")
+    else:
+        print("status=SUCCESS")
+
+
 def verify_data():
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
@@ -321,6 +446,8 @@ def verify_data():
     _print_price_quality(loader)
     _print_price_mapping_quality(loader)
     _print_ratio_and_short_quality(loader)
+    _print_symbol_quality(loader)
+    _print_market_ranking_quality(loader)
     _macro_series_status(loader, today)
 
 

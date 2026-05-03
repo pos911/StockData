@@ -18,6 +18,7 @@ from src.collectors.naver_news_collector import NaverNewsCollector
 from src.normalizers.stock_normalizer import StockNormalizer
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
+from src.utils.symbols import canonical_symbol_key, normalize_symbol_value
 
 logger = get_logger(__name__)
 
@@ -27,32 +28,31 @@ _NON_COMMON_NAME_PATTERNS = [
     r"SPAC",
     r"REIT",
     r"Preferred",
-    r"우$",
-    r"우B$",
-    r"1우$",
-    r"2우$",
-    r"3우$",
+    r"??",
+    r"?캛$",
+    r"1??",
+    r"2??",
+    r"3??",
 ]
 
-_ETF_NAME_MARKERS = ("KODEX", "TIGER", "RISE", "ACE", "PLUS", "SOL", "HANARO", "KOSEF", "TIMEFOLIO", "ETF")
+_ETF_NAME_PREFIXES = ("KODEX", "TIGER", "RISE", "ACE", "SOL", "HANARO", "KOSEF", "TIMEFOLIO")
 _ETN_NAME_MARKERS = ("ETN",)
 _STANDARD_MARKETS = {"KOSPI", "KOSDAQ", "ETF", "ETN"}
 
 
-def _normalize_symbol_value(symbol: str) -> str:
-    if not symbol:
-        return ""
-    normalized = symbol[1:] if symbol.startswith("Q") and len(symbol) > 1 else symbol
-    return normalized.zfill(6) if normalized.isdigit() and len(normalized) < 6 else normalized
-
-
-def _canonical_symbol_key(symbol: str) -> str:
-    return _normalize_symbol_value(symbol)
-
+def _is_etf_like_name(name: str | None) -> bool:
+    if not name:
+        return False
+    upper_name = str(name).strip().upper()
+    if "ETN" in upper_name:
+        return False
+    if upper_name.startswith("PLUS "):
+        return True
+    return upper_name.startswith(_ETF_NAME_PREFIXES) or " ETF" in upper_name or upper_name == "ETF"
 
 def _prefer_symbol(existing_symbol: str, new_symbol: str) -> str:
-    normalized_existing = _normalize_symbol_value(existing_symbol)
-    normalized_new = _normalize_symbol_value(new_symbol)
+    normalized_existing = normalize_symbol_value(existing_symbol)
+    normalized_new = normalize_symbol_value(new_symbol)
     if normalized_existing and len(normalized_existing) >= len(normalized_new):
         return normalized_existing
     return normalized_new or normalized_existing
@@ -78,7 +78,7 @@ def _infer_market_from_name(name: str) -> str | None:
     upper_name = name.upper()
     if any(marker in upper_name for marker in _ETN_NAME_MARKERS):
         return "ETN"
-    if any(marker in upper_name for marker in _ETF_NAME_MARKERS):
+    if _is_etf_like_name(name):
         return "ETF"
     return None
 
@@ -92,9 +92,9 @@ def _standardize_market(market: str | None, name: str | None = None) -> str | No
     value = str(market).strip().upper()
     if value in _STANDARD_MARKETS:
         return value
-    if value in {"J", "STOCK", "KS", "KSE", "유가", "유가증권"}:
+    if value in {"J", "STOCK", "KS", "KSE"}:
         return "KOSPI"
-    if value in {"Q", "KQ", "KOSDAQ GLOBAL", "코스닥"}:
+    if value in {"Q", "KQ", "KOSDAQ GLOBAL"}:
         return "KOSDAQ"
     return None
 
@@ -291,7 +291,7 @@ def _sync_static_universe_to_master(loader: SupabaseLoader):
         market = _standardize_market(item.get("market"), item.get("name")) or "KOSPI"
         asset_type = _infer_asset_type(item.get("name"), market)
         static_record = {
-            "symbol": _normalize_symbol_value(item.get("symbol")),
+            "symbol": normalize_symbol_value(item.get("symbol")),
             "name": item.get("name"),
             "market": market,
             "asset_type": asset_type,
@@ -367,7 +367,7 @@ def _sync_universe_to_master(
     records = []
     seen = set()
     for stock in universe:
-        symbol = _normalize_symbol_value(stock.get("symbol", ""))
+        symbol = normalize_symbol_value(stock.get("symbol", ""))
         if not symbol or symbol in seen:
             continue
         seen.add(symbol)
@@ -408,7 +408,7 @@ async def _collect_full_universe_prices(
         f"Starting full-universe price ingestion: symbols={len(target_universe)}, date={base_ymd}"
     )
     for idx, stock in enumerate(target_universe, 1):
-        symbol = _normalize_symbol_value(stock.get("symbol", ""))
+        symbol = normalize_symbol_value(stock.get("symbol", ""))
         name = stock.get("name") or symbol
         if not symbol:
             continue
@@ -604,9 +604,9 @@ async def run_pipeline(target_date: date, limit: int = None):
     try:
         res = loader.client.table("stocks_master").select("symbol, name, market, asset_type").eq("is_active", True).execute()
         active_stocks = res.data if res.data else []
-        universe_keys = {_canonical_symbol_key(item["symbol"]) for item in universe}
+        universe_keys = {canonical_symbol_key(item["symbol"]) for item in universe}
         for stock in active_stocks:
-            if _canonical_symbol_key(stock["symbol"]) not in universe_keys:
+            if canonical_symbol_key(stock["symbol"]) not in universe_keys:
                 universe.append(
                     {
                         "symbol": stock["symbol"],
@@ -637,7 +637,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     canonical_map = {}
     for stock in universe:
         symbol = stock["symbol"]
-        key = _canonical_symbol_key(symbol)
+        key = canonical_symbol_key(symbol)
         if key not in canonical_map:
             canonical_map[key] = dict(stock)
         else:
@@ -650,8 +650,8 @@ async def run_pipeline(target_date: date, limit: int = None):
     universe = list(canonical_map.values())
 
     for stock in universe:
-        stock["symbol"] = _normalize_symbol_value(stock["symbol"])
-        listing_info = market_classification_map.get(_canonical_symbol_key(stock["symbol"])) or market_classification_map.get(stock["symbol"])
+        stock["symbol"] = normalize_symbol_value(stock["symbol"])
+        listing_info = market_classification_map.get(canonical_symbol_key(stock["symbol"])) or market_classification_map.get(stock["symbol"])
         if listing_info:
             stock["name"] = listing_info.get("name") or stock["name"]
             stock["market"] = _prefer_market(stock.get("market"), listing_info.get("market"))

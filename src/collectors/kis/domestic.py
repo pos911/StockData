@@ -5,6 +5,7 @@ from datetime import date, datetime
 from .base import KISBaseCollector
 from .mapping import KIS_MAPPING
 from src.utils.logger import get_logger
+from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
 
@@ -27,15 +28,6 @@ _SHORT_RATIO_CANDIDATES = (
     "acml_ssts_cntg_qty_rlim",
     "acml_ssts_tr_pbmn_rlim",
 )
-
-
-def _normalize_symbol_value(symbol: Any) -> str:
-    if symbol is None:
-        return ""
-    text = str(symbol).strip().upper()
-    if text.isdigit():
-        return text.zfill(6)
-    return text
 
 
 def _parse_int(value) -> int:
@@ -156,7 +148,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return _INVESTOR_REQUIRED_KEYS.issubset(row_keys)
 
     async def _fetch_investor_payload(self, symbol: str):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["investor_trend"]
         attempts = []
 
@@ -191,7 +183,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         end_date: str = "",
         available_at: Optional[str] = None,
     ):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["ohlcv"]
         tr_id = mapping["tr_id"] if timeframe == "D" else "FHKST03010200"
         params = {
@@ -268,7 +260,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return records
 
     async def fetch_investor_trend(self, symbol: str, available_at: Optional[str] = None):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         market_div_code, rows = await self._fetch_investor_payload(symbol)
         if not rows:
             return []
@@ -335,7 +327,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return records
 
     async def _fetch_short_selling_payload(self, symbol: str, target_ymd: str, market_code: str):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["short_selling"]
         params = {
             "FID_COND_MRKT_DIV_CODE": market_code,
@@ -353,7 +345,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         market_code: Optional[str] = None,
         available_at: Optional[str] = None,
     ):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         target_ymd = target_date.strftime("%Y%m%d") if hasattr(target_date, "strftime") else str(target_date).replace("-", "")
         now_iso = datetime.now().isoformat()
         attempts = []
@@ -388,6 +380,7 @@ class KISDomesticStockCollector(KISBaseCollector):
                     f"symbol={symbol}, target_date={target_ymd}, market_code={resolved_market}, error={exc}"
                 )
                 continue
+
             rows, output1 = _extract_output_rows(data)
             api_rows += len(rows)
             attempts.append(
@@ -441,16 +434,10 @@ class KISDomesticStockCollector(KISBaseCollector):
                         f"row_keys={sorted(row.keys())}, output1_keys={sorted(output1.keys())}"
                     )
                     continue
-                short_volume = _parse_int(_first_present(row, _SHORT_VOLUME_CANDIDATES))
-                short_value = _parse_int(_first_present(row, _SHORT_VALUE_CANDIDATES))
-                short_ratio_raw = _first_present(row, _SHORT_RATIO_CANDIDATES, default=None)
-                short_ratio = _parse_float_nullable(short_ratio_raw)
-                if short_ratio is None and (short_volume > 0 or short_value > 0):
-                    logger.warning(
-                        f"Short selling ratio unavailable despite positive volume/value: "
-                        f"symbol={symbol}, base_date={formatted_date}, short_volume={short_volume}, "
-                        f"short_value={short_value}, row_keys={sorted(row.keys())}"
-                    )
+
+                short_volume = _parse_int(_first_present(row, _SHORT_VOLUME_CANDIDATES, default=0))
+                short_value = _parse_int(_first_present(row, _SHORT_VALUE_CANDIDATES, default=0))
+                short_ratio = _parse_float_nullable(_first_present(row, _SHORT_RATIO_CANDIDATES, default=None))
                 records.append(
                     {
                         "symbol": symbol,
@@ -462,6 +449,7 @@ class KISDomesticStockCollector(KISBaseCollector):
                         "available_at": available_at or now_iso,
                     }
                 )
+
             if records:
                 break
 
@@ -469,76 +457,19 @@ class KISDomesticStockCollector(KISBaseCollector):
             await self.upsert_records("raw_stock_short_selling", raw_records)
 
         if not records:
-            fallback = self._fetch_short_selling_pykrx(symbol, target_ymd, available_at=available_at or now_iso)
-            if fallback:
-                records.extend(fallback)
-
-        if records:
-            ok = await self.upsert_records("normalized_stock_short_selling", records)
-            if ok is False:
-                logger.error(f"Short selling normalized upsert failed for {symbol} on {target_ymd}.")
-        else:
             logger.warning(
-                f"No short selling records collected after KIS/fallback attempts: symbol={symbol}, "
-                f"target_date={target_ymd}, attempts={json.dumps(attempts[:2], ensure_ascii=False, default=str)[:1200]}"
+                "Short selling collection returned no normalized rows: "
+                f"symbol={symbol}, target_date={target_ymd}, api_rows={api_rows}, blocked_rows={blocked_rows}, attempts={attempts}"
             )
+            return []
 
         logger.info(
-            f"Short selling collection summary: symbol={symbol}, target_date={target_ymd}, "
-            f"api_rows={api_rows}, success_rows={len(records)}, blocked_rows={blocked_rows}"
+            "Short selling collection summary: "
+            f"symbol={symbol}, target_date={target_ymd}, api_rows={api_rows}, blocked_rows={blocked_rows}, "
+            f"normalized_rows={len(records)}"
         )
+        await self.upsert_records("normalized_stock_short_selling", records)
         return records
-
-    def _fetch_short_selling_pykrx(self, symbol: str, target_ymd: str, available_at: Optional[str] = None):
-        symbol = _normalize_symbol_value(symbol)
-        try:
-            from pykrx import stock
-
-            functions = [
-                "get_shorting_status_by_date",
-                "get_shorting_volume_by_date",
-                "get_shorting_value_by_date",
-            ]
-            available_functions = [name for name in functions if hasattr(stock, name)]
-            if not available_functions:
-                logger.warning("pykrx short selling functions are unavailable.")
-                return []
-
-            for function_name in available_functions:
-                func = getattr(stock, function_name)
-                try:
-                    df = func(target_ymd, target_ymd, symbol)
-                except TypeError:
-                    continue
-                if df is None or df.empty:
-                    continue
-
-                row = df.iloc[-1].to_dict()
-                base_date = _normalize_date_value(str(df.index[-1])) or _normalize_date_value(target_ymd)
-                logger.info(f"PYKRX short selling fallback succeeded: symbol={symbol}, function={function_name}")
-                short_volume = _parse_int(
-                    _first_present(row, ("공매도", "수량", "short_volume", "거래량", "short_sell_qty", "volume"))
-                )
-                short_value = _parse_int(
-                    _first_present(row, ("금액", "거래대금", "short_value", "short_sell_amt", "trading_value"))
-                )
-                short_ratio = _parse_float_nullable(
-                    _first_present(row, ("비중", "비중(%)", "short_ratio", "short_sell_vol_rate"), default=None)
-                )
-                return [
-                    {
-                        "symbol": symbol,
-                        "base_date": base_date,
-                        "short_volume": short_volume,
-                        "short_value": short_value,
-                        "short_ratio": short_ratio,
-                        "source": "PYKRX",
-                        "available_at": available_at or datetime.now().isoformat(),
-                    }
-                ]
-        except Exception as exc:
-            logger.warning(f"PYKRX short selling fallback failed for {symbol}: {exc}")
-        return []
 
     async def fetch_volume_rank(self, market_code: str = "J", target_code: str = "0000"):
         params = {
@@ -567,7 +498,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         return data.get("output", []) if data else []
 
     async def fetch_fundamental_info(self, symbol: str, base_date: str, available_at: Optional[str] = None) -> dict:
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": symbol,

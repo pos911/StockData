@@ -3,17 +3,9 @@ from typing import Dict, Any, List, Optional
 from .base import KISBaseCollector
 from .mapping import KIS_MAPPING
 from src.utils.logger import get_logger
+from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
-
-
-def _normalize_symbol_value(symbol: Any) -> str:
-    if symbol is None:
-        return ""
-    text = str(symbol).strip().upper()
-    if text.isdigit():
-        return text.zfill(6)
-    return text
 
 
 def _parse_float_nullable(value: Any) -> Optional[float]:
@@ -29,7 +21,7 @@ class KISFundamentalsCollector(KISBaseCollector):
     """기업 펀더멘털 및 재무 지표 수집기"""
 
     async def fetch_financial_statements(self, symbol: str, available_at: Optional[str] = None):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         """
         대차대조표, 손익계산서 주요 항목 수집 (과거 이력 포함)
         TR_ID: FHKST66430300
@@ -69,7 +61,7 @@ class KISFundamentalsCollector(KISBaseCollector):
         return records
 
     async def fetch_valuation_ratios(self, symbol: str, base_date: Optional[str] = None, available_at: Optional[str] = None):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         """
         가치평가 및 부채 비율 수집
         TR_ID: FHKST66430600 (안정성), FHKST01010100 (현재가-PER/PBR)
@@ -113,7 +105,7 @@ class KISFundamentalsCollector(KISBaseCollector):
         return record
 
     async def fetch_profitability_ratios(self, symbol: str, base_date: Optional[str] = None, available_at: Optional[str] = None):
-        symbol = _normalize_symbol_value(symbol)
+        symbol = normalize_symbol_value(symbol)
         """
         수익성 비율 (ROE 등) - 단독 호출용 또는 보완용
         """
