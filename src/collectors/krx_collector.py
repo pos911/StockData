@@ -6,6 +6,8 @@ import requests
 import FinanceDataReader as fdr
 from src.utils.logger import get_logger
 from src.utils.http_client import HttpClient
+from src.utils.symbols import normalize_symbol_value
+from src.utils.time_utils import generate_available_at_for_eod
 
 logger = get_logger(__name__)
 
@@ -32,6 +34,78 @@ class KRXCollector:
         if "KONEX" in label:
             return "KONEX"
         return label
+
+    @staticmethod
+    def _parse_numeric(value):
+        if value in (None, "", "-"):
+            return None
+        try:
+            return float(str(value).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _format_base_date(value: str | None, target_date: date) -> str:
+        text = str(value or "").strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 8:
+            return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+        return target_date.strftime("%Y-%m-%d")
+
+    def fetch_krx_api(self, endpoint: str, target_date: date) -> List[Dict[str, Any]]:
+        if not self.auth_key:
+            logger.warning(f"KRX auth_key missing; skipping endpoint={endpoint}")
+            return []
+        try:
+            response = requests.get(
+                endpoint,
+                params={"basDd": target_date.strftime("%Y%m%d")},
+                headers={"AUTH_KEY": self.auth_key},
+                timeout=20,
+            )
+            if response.status_code in {403, 404}:
+                logger.warning(f"KRX API unavailable endpoint={endpoint} status={response.status_code}")
+                return []
+            response.raise_for_status()
+            data = response.json()
+            rows = data.get("OutBlock_1") or []
+            if not isinstance(rows, list):
+                rows = []
+            sample_columns = sorted(rows[0].keys()) if rows else []
+            logger.info(
+                f"KRX API fetched endpoint={endpoint} target_date={target_date:%Y-%m-%d} "
+                f"row_count={len(rows)} columns={sample_columns}"
+            )
+            return rows
+        except Exception as exc:
+            logger.warning(f"KRX API request failed endpoint={endpoint}: {exc}")
+            return []
+
+    def fetch_etf_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
+        return self.fetch_krx_api("https://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd", target_date)
+
+    def fetch_etn_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
+        return self.fetch_krx_api("https://data-dbg.krx.co.kr/svc/apis/etp/etn_bydd_trd", target_date)
+
+    def normalize_krx_etp_row(self, row: Dict[str, Any], market: str, asset_type: str, target_date: date) -> Dict[str, Any]:
+        symbol = normalize_symbol_value(row.get("ISU_CD"))
+        return {
+            "symbol": symbol,
+            "name": row.get("ISU_NM"),
+            "base_date": self._format_base_date(row.get("BAS_DD"), target_date),
+            "open_price": self._parse_numeric(row.get("TDD_OPNPRC")),
+            "high_price": self._parse_numeric(row.get("TDD_HGPRC")),
+            "low_price": self._parse_numeric(row.get("TDD_LWPRC")),
+            "close_price": self._parse_numeric(row.get("TDD_CLSPRC")),
+            "volume": self._parse_numeric(row.get("ACC_TRDVOL")),
+            "trading_value": self._parse_numeric(row.get("ACC_TRDVAL")),
+            "market_cap": self._parse_numeric(row.get("MKTCAP")),
+            "outstanding_shares": self._parse_numeric(row.get("LIST_SHRS")),
+            "market": market,
+            "asset_type": asset_type,
+            "source": "KRX",
+            "available_at": generate_available_at_for_eod(target_date).isoformat(),
+        }
 
     def fetch_market_classification_map(self) -> Dict[str, Dict[str, str]]:
         """Return symbol -> {name, market} using FinanceDataReader stock listings."""
@@ -84,6 +158,48 @@ class KRXCollector:
         except Exception as exc:
             logger.warning(f"Failed to fetch market classification map from pykrx: {exc}")
             return {}
+
+    def fetch_kind_listings(self) -> List[Dict[str, str]]:
+        return self._fetch_full_universe_from_kind()
+
+    def fetch_fdr_krx_listings(self) -> List[Dict[str, str]]:
+        mapping = self.fetch_market_classification_map()
+        rows = [
+            {"code": symbol, "name": info.get("name", ""), "market": info.get("market")}
+            for symbol, info in mapping.items()
+            if info.get("market") in {"KOSPI", "KOSDAQ"}
+        ]
+        return sorted(rows, key=lambda row: row["code"])
+
+    def fetch_pykrx_market_listings(self, target_date: Optional[date] = None) -> List[Dict[str, str]]:
+        try:
+            from pykrx import stock
+
+            query_base = target_date or date.today()
+            rows: Dict[str, Dict[str, str]] = {}
+            for offset in range(0, 14):
+                query_date = query_base - timedelta(days=offset)
+                query_ymd = query_date.strftime("%Y%m%d")
+                for market in ("KOSPI", "KOSDAQ"):
+                    try:
+                        tickers = stock.get_market_ticker_list(query_ymd, market=market)
+                    except Exception as market_exc:
+                        logger.warning(
+                            f"pykrx listing failed for {market} on {query_ymd}: {market_exc}"
+                        )
+                        tickers = []
+                    for ticker in tickers or []:
+                        rows[ticker] = {
+                            "code": ticker,
+                            "name": stock.get_market_ticker_name(ticker),
+                            "market": market,
+                        }
+                if rows:
+                    break
+            return sorted(rows.values(), key=lambda row: row["code"])
+        except Exception as exc:
+            logger.warning(f"Failed to fetch pykrx market listings: {exc}")
+            return []
 
     def fetch_full_universe(self, target_date: Optional[date] = None) -> List[Dict[str, str]]:
         """Return the full KOSPI/KOSDAQ listed universe for price ingestion.

@@ -406,6 +406,102 @@ def _print_market_ranking_quality(loader: SupabaseLoader):
         print("status=SUCCESS")
 
 
+def _print_market_master_quality(loader: SupabaseLoader):
+    print("\n=== MARKET MASTER QUALITY ===")
+    rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+    counts = {"KOSPI": 0, "KOSDAQ": 0, "ETF": 0, "ETN": 0}
+    unknown_market_count = 0
+    q_prefix_count = 0
+    symbols = []
+    for row in rows:
+        symbol = row.get("symbol")
+        market = _standardize_market_value(row.get("market"))
+        if symbol:
+            symbols.append(symbol)
+            if is_q_prefixed_numeric_symbol(symbol):
+                q_prefix_count += 1
+        if market in counts:
+            counts[market] += 1
+        else:
+            unknown_market_count += 1
+    duplicate_symbol_count = len(symbols) - len(set(symbols))
+    print(f"KOSPI count={counts['KOSPI']}")
+    print(f"KOSDAQ count={counts['KOSDAQ']}")
+    print(f"ETF count={counts['ETF']}")
+    print(f"ETN count={counts['ETN']}")
+    print(f"unknown market count={unknown_market_count}")
+    print(f"duplicate symbol count={duplicate_symbol_count}")
+    print(f"q_prefix count={q_prefix_count}")
+    if q_prefix_count > 0:
+        print("status=FAIL_SYMBOL_NORMALIZATION")
+    elif counts["KOSDAQ"] < 1000:
+        print("status=FAIL_KOSDAQ_MASTER")
+    elif counts["ETF"] < 100:
+        print("status=WARN_ETF_MASTER")
+    elif counts["ETN"] == 0:
+        print("status=WARN_ETN_MASTER")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
+    print("\n=== RANKING SOURCE QUALITY ===")
+    latest = _latest(loader, "normalized_market_rankings_daily", "base_date")
+    if not latest:
+        print("status=FAIL_RANKING_EMPTY")
+        return
+    ranking_rows = loader.fetch_all("normalized_market_rankings_daily", "base_date", latest, latest)
+    master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+    master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+    mismatch_rows = 0
+    q_prefix_rows = 0
+    kis_kospi_volume = 0
+    kis_kosdaq_volume = 0
+    trading_value_counts = {}
+    market_cap_counts = {}
+    legacy_kis_rankings = 0
+    for row in ranking_rows:
+        symbol = row.get("symbol")
+        if is_q_prefixed_numeric_symbol(symbol):
+            q_prefix_rows += 1
+        master = master_map.get(symbol)
+        ranking_market = _standardize_market_value(row.get("market"))
+        master_market = _standardize_market_value(master.get("market")) if master else None
+        if ranking_market != "KOSPI200" and master and master_market != ranking_market:
+            mismatch_rows += 1
+        if row.get("source") == "KIS" and row.get("rank_type") == "volume" and ranking_market == "KOSPI":
+            kis_kospi_volume += 1
+        if row.get("source") == "KIS" and row.get("rank_type") == "volume" and ranking_market == "KOSDAQ":
+            kis_kosdaq_volume += 1
+        if row.get("rank_type") == "trading_value":
+            trading_value_counts[ranking_market] = trading_value_counts.get(ranking_market, 0) + 1
+        if row.get("rank_type") == "market_cap":
+            market_cap_counts[ranking_market] = market_cap_counts.get(ranking_market, 0) + 1
+        if row.get("source") == "KIS" and row.get("rank_type") in ("trading_value", "market_cap"):
+            legacy_kis_rankings += 1
+    stale_days = _stale_days(latest, today)
+    print(f"latest ranking date={latest}")
+    print(f"KIS KOSPI volume count={kis_kospi_volume}")
+    print(f"KIS KOSDAQ volume count={kis_kosdaq_volume}")
+    print(f"trading_value ranking count by market={trading_value_counts}")
+    print(f"market_cap ranking count by market={market_cap_counts}")
+    print(f"market mismatch rows={mismatch_rows}")
+    print(f"q_prefix rows={q_prefix_rows}")
+    print(f"stale ranking rows={0 if stale_days is None else stale_days}")
+    if kis_kospi_volume == 0:
+        print("status=FAIL_KIS_KOSPI_VOLUME_RANK")
+    elif kis_kosdaq_volume == 0:
+        print("status=FAIL_KIS_KOSDAQ_VOLUME_RANK")
+    elif mismatch_rows > 0:
+        print("status=FAIL_RANKING_MARKET_MISMATCH")
+    elif q_prefix_rows > 0:
+        print("status=FAIL_SYMBOL_NORMALIZATION")
+    elif legacy_kis_rankings > 0:
+        print("status=WARN_LEGACY_KIS_RANKING")
+    else:
+        print("status=SUCCESS")
+
+
 def verify_data():
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
@@ -448,6 +544,8 @@ def verify_data():
     _print_ratio_and_short_quality(loader)
     _print_symbol_quality(loader)
     _print_market_ranking_quality(loader)
+    _print_market_master_quality(loader)
+    _print_ranking_source_quality(loader, today)
     _macro_series_status(loader, today)
 
 

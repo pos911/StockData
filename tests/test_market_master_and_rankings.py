@@ -1,0 +1,190 @@
+import asyncio
+
+import pytest
+
+from src.collectors.krx_collector import KRXCollector
+from src.jobs.run_daily_master_pipeline import _master_record
+from src.jobs.run_daily_ranking_pipeline import _filter_kis_volume_rows, _persist_rankings
+from src.jobs.run_daily_stock_pipeline import _should_skip_full_universe_price_ingestion
+from src.utils.dynamic_universe_loader import DynamicUniverseLoader
+
+
+def test_normalize_krx_etf_row():
+    collector = KRXCollector(auth_key="")
+    row = {
+        "BAS_DD": "20260502",
+        "ISU_CD": "069500",
+        "ISU_NM": "KODEX 200",
+        "TDD_CLSPRC": "35,100",
+        "TDD_OPNPRC": "35,000",
+        "TDD_HGPRC": "35,200",
+        "TDD_LWPRC": "34,950",
+        "ACC_TRDVOL": "1,234,567",
+        "ACC_TRDVAL": "43,210,000,000",
+        "MKTCAP": "5,000,000,000,000",
+        "LIST_SHRS": "142,000,000",
+    }
+    normalized = collector.normalize_krx_etp_row(row, "ETF", "ETF", __import__("datetime").date(2026, 5, 2))
+    assert normalized["symbol"] == "069500"
+    assert normalized["market"] == "ETF"
+    assert normalized["asset_type"] == "ETF"
+    assert normalized["close_price"] == 35100.0
+
+
+def test_normalize_krx_etn_row():
+    collector = KRXCollector(auth_key="")
+    row = {
+        "BAS_DD": "20260502",
+        "ISU_CD": "550001",
+        "ISU_NM": "Sample ETN",
+        "TDD_CLSPRC": "10,010",
+        "TDD_OPNPRC": "10,000",
+        "TDD_HGPRC": "10,100",
+        "TDD_LWPRC": "9,990",
+        "ACC_TRDVOL": "12,345",
+        "ACC_TRDVAL": "123,450,000",
+        "MKTCAP": "999,999,999",
+        "LIST_SHRS": "100,000",
+    }
+    normalized = collector.normalize_krx_etp_row(row, "ETN", "ETN", __import__("datetime").date(2026, 5, 2))
+    assert normalized["symbol"] == "550001"
+    assert normalized["market"] == "ETN"
+    assert normalized["asset_type"] == "ETN"
+
+
+def test_kis_volume_rank_filters_to_approved_market_and_normalizes_symbol():
+    master_map = {
+        "005930": {"market": "KOSPI", "asset_type": "STOCK", "name": "Samsung"},
+        "069500": {"market": "ETF", "asset_type": "ETF", "name": "KODEX 200"},
+        "058470": {"market": "KOSDAQ", "asset_type": "STOCK", "name": "Leeno"},
+    }
+    rows = [
+        {"mksc_shrn_iscd": "Q005930", "hts_kor_isnm": "Samsung", "acml_vol": "100", "acml_tr_pbmn": "1000"},
+        {"mksc_shrn_iscd": "069500", "hts_kor_isnm": "KODEX 200", "acml_vol": "200", "acml_tr_pbmn": "2000"},
+        {"mksc_shrn_iscd": "058470", "hts_kor_isnm": "Leeno", "acml_vol": "300", "acml_tr_pbmn": "3000"},
+    ]
+    kospi = _filter_kis_volume_rows(rows, master_map, "KOSPI")
+    kosdaq = _filter_kis_volume_rows(rows, master_map, "KOSDAQ")
+    assert [row["symbol"] for row in kospi] == ["005930"]
+    assert [row["symbol"] for row in kosdaq] == ["058470"]
+
+
+class _FakeDeleteQuery:
+    def __init__(self):
+        self.filters = []
+
+    def eq(self, key, value):
+        self.filters.append((key, value))
+        return self
+
+    def execute(self):
+        return self
+
+
+class _FakeTable:
+    def __init__(self, parent, name):
+        self.parent = parent
+        self.name = name
+
+    def delete(self):
+        query = _FakeDeleteQuery()
+        self.parent.deletes.append((self.name, query))
+        return query
+
+
+class _FakeClient:
+    def __init__(self):
+        self.deletes = []
+
+    def table(self, name):
+        return _FakeTable(self, name)
+
+
+class _FakeLoader:
+    def __init__(self):
+        self.client = _FakeClient()
+        self.upserts = []
+
+    def upsert_records(self, table, records, **_kwargs):
+        self.upserts.append((table, records))
+        return True
+
+
+def test_persist_rankings_deletes_same_source_combo_and_reassigns_rank():
+    loader = _FakeLoader()
+    rows = [
+        {"symbol": "005930", "name": "Samsung", "volume": 100, "trading_value": 1000, "market_cap": None, "change_rate": None, "metric_value": 100, "raw_data": {}},
+        {"symbol": "000660", "name": "SK hynix", "volume": 90, "trading_value": 900, "market_cap": None, "change_rate": None, "metric_value": 90, "raw_data": {}},
+    ]
+    count = _persist_rankings(loader, __import__("datetime").date(2026, 5, 3), "KOSPI", "volume", "KIS", rows)
+    assert count == 2
+    normalized = next(records for table, records in loader.upserts if table == "normalized_market_rankings_daily")
+    assert [row["rank"] for row in normalized] == [1, 2]
+
+
+def test_master_record_has_no_rank_field():
+    record = _master_record("005930", "Samsung", "KOSPI", "STOCK")
+    assert "rank" not in record
+
+
+@pytest.mark.asyncio
+async def test_dynamic_universe_loader_uses_ranking_table_without_kis_calls():
+    loader = DynamicUniverseLoader.__new__(DynamicUniverseLoader)
+    loader.static_universe_path = "config/stock_universe.json"
+
+    class NoKISCollector:
+        async def fetch_volume_rank(self, *args, **kwargs):
+            raise AssertionError("KIS ranking API should not be called")
+
+    loader.collector = NoKISCollector()
+
+    class TableResult:
+        def __init__(self, data):
+            self.data = data
+
+    class Query:
+        def __init__(self, data):
+            self.data = data
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            return TableResult(self.data)
+
+    class Client:
+        def table(self, name):
+            if name == "stocks_master":
+                return Query([
+                    {"symbol": "005930", "name": "Samsung", "market": "KOSPI", "asset_type": "STOCK", "is_active": True},
+                ])
+            if name == "normalized_market_rankings_daily":
+                return Query([
+                    {"base_date": "2026-05-03"},
+                    {"symbol": "005930", "name": "Samsung", "market": "KOSPI", "rank_type": "volume"},
+                ])
+            if name == "static_stock_universe":
+                return Query([])
+            return Query([])
+
+    class FakeSupabaseLoader:
+        def __init__(self):
+            self.client = Client()
+
+    loader.loader = FakeSupabaseLoader()
+    universe = await loader.get_combined_universe(auto_backfill=False)
+    assert any(row["symbol"] == "005930" for row in universe)
+
+
+def test_full_universe_price_ingestion_guardrail_skip():
+    assert _should_skip_full_universe_price_ingestion(2000) is True
+    assert _should_skip_full_universe_price_ingestion(1999) is False

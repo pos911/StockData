@@ -555,12 +555,59 @@ def _infer_markets_from_supply_raw(loader: SupabaseLoader, base_date_str: str) -
     return market_map
 
 
+def _latest_valid_price_coverage(loader: SupabaseLoader) -> tuple[str | None, int]:
+    try:
+        latest_res = (
+            loader.client.table("normalized_stock_prices_daily")
+            .select("base_date")
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not latest_res.data:
+            return None, 0
+        latest_date = latest_res.data[0]["base_date"]
+        rows = (
+            loader.client.table("normalized_stock_prices_daily")
+            .select("symbol, close_price, volume, trading_value")
+            .eq("base_date", latest_date)
+            .execute()
+            .data
+            or []
+        )
+        master_rows = (
+            loader.client.table("stocks_master")
+            .select("symbol, market, asset_type")
+            .execute()
+            .data
+            or []
+        )
+        master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+        count = 0
+        for row in rows:
+            master = master_map.get(row.get("symbol"))
+            if not master:
+                continue
+            if master.get("market") not in {"KOSPI", "KOSDAQ"} or master.get("asset_type") != "STOCK":
+                continue
+            if row.get("close_price") in (None, "") or row.get("volume") in (None, "") or row.get("trading_value") in (None, ""):
+                continue
+            count += 1
+        return latest_date, count
+    except Exception as exc:
+        logger.warning(f"Failed to compute latest valid price coverage: {exc}")
+        return None, 0
+
+
+def _should_skip_full_universe_price_ingestion(valid_stock_rows: int) -> bool:
+    return valid_stock_rows >= 2000
+
+
 async def run_pipeline(target_date: date, limit: int = None):
     logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
 
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
-    _sync_static_universe_to_master(loader)
 
     auth_mgr = KISAuthManager(config)
     await auth_mgr.initialize()
@@ -571,20 +618,26 @@ async def run_pipeline(target_date: date, limit: int = None):
 
     universe_loader = DynamicUniverseLoader(config, kis_collector)
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
-    full_universe = universe_loader.fetch_full_universe(target_date=target_date)
-    _sync_universe_to_master(loader, full_universe, activate_new=False)
-
     available_at = generate_available_at_for_eod(target_date)
     base_date_str = target_date.strftime("%Y-%m-%d")
-    full_price_processed = await _collect_full_universe_prices(
-        loader=loader,
-        kis_collector=kis_collector,
-        krx_collector=krx_collector,
-        universe=full_universe,
-        target_date=target_date,
-        available_at=available_at.isoformat(),
-        limit=limit,
-    )
+    latest_valid_price_date, latest_valid_price_count = _latest_valid_price_coverage(loader)
+    full_price_processed = 0
+    if _should_skip_full_universe_price_ingestion(latest_valid_price_count):
+        logger.info(
+            f"Skipping full-universe KIS OHLCV ingestion: latest_valid_price_date={latest_valid_price_date}, "
+            f"valid_stock_rows={latest_valid_price_count}"
+        )
+    else:
+        full_universe = universe_loader.fetch_full_universe(target_date=target_date)
+        full_price_processed = await _collect_full_universe_prices(
+            loader=loader,
+            kis_collector=kis_collector,
+            krx_collector=krx_collector,
+            universe=full_universe,
+            target_date=target_date,
+            available_at=available_at.isoformat(),
+            limit=limit,
+        )
 
     universe = await universe_loader.get_combined_universe(auto_backfill=limit is None)
     market_classification_map = krx_collector.fetch_market_classification_map()
@@ -664,23 +717,6 @@ async def run_pipeline(target_date: date, limit: int = None):
         if inferred_market:
             stock["market"] = _standardize_market(_prefer_market(stock.get("market"), inferred_market), stock.get("name")) or stock.get("market")
             stock["asset_type"] = _infer_asset_type(stock.get("name"), stock.get("market"))
-
-    market_updates = []
-    for stock in universe:
-        market = _standardize_market(stock.get("market"), stock.get("name")) or "KOSPI"
-        asset_type = _infer_asset_type(stock.get("name"), market)
-        market_updates.append(
-            {
-                "symbol": stock["symbol"],
-                "name": stock["name"],
-                "market": market,
-                "asset_type": asset_type,
-                "is_active": True,
-                "updated_at": get_current_kst().isoformat(),
-            }
-        )
-    if market_updates:
-        loader.upsert_records("stocks_master", market_updates)
 
     if limit:
         logger.info(f"Limiting execution to first {limit} symbols for verification.")
@@ -1006,8 +1042,14 @@ async def run_pipeline(target_date: date, limit: int = None):
     loader.insert_log(
         "daily_stock_full_price_pipeline",
         target_date.strftime("%Y-%m-%d"),
-        "SUCCESS" if full_price_processed > 0 else "WARN",
+        "SUCCESS" if full_price_processed > 0 or _should_skip_full_universe_price_ingestion(latest_valid_price_count) else "WARN",
         full_price_processed,
+        "" if full_price_processed > 0 else (
+            f"skipped_full_universe_prices latest_valid_price_date={latest_valid_price_date} "
+            f"valid_stock_rows={latest_valid_price_count}"
+            if _should_skip_full_universe_price_ingestion(latest_valid_price_count)
+            else ""
+        ),
     )
     logger.info("Pipeline Finished Successfully.")
 
