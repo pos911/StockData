@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
+from src.utils.market_data_quality import get_latest_valid_price_date
 from src.utils.config_loader import load_config
 from src.utils.time_utils import get_current_kst
 from src.utils.symbols import is_q_prefixed_numeric_symbol, normalize_symbol_value
@@ -249,6 +250,24 @@ def _raw_price_value(raw_payload: Any, *keys: str) -> Any:
     return None
 
 
+def fetch_latest_normalized_macro_value(loader: SupabaseLoader, series_id: str, target_date: date):
+    try:
+        response = (
+            loader.client.table("normalized_macro_series")
+            .select("value, base_date")
+            .eq("series_id", series_id)
+            .lte("base_date", target_date.isoformat())
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return response.data[0]
+    except Exception as exc:
+        print(f"normalized_macro_series lookup failed for {series_id}: {exc}")
+    return None
+
+
 def _print_price_mapping_quality(loader: SupabaseLoader):
     print("\n=== RAW/NORMALIZED PRICE FIELD QUALITY ===")
     raw_latest = _latest(loader, "raw_stock_prices_daily", "base_date")
@@ -452,16 +471,16 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
     if not latest:
         print("status=FAIL_RANKING_EMPTY")
         return
+    quality = get_latest_valid_price_date(loader, today, lookback_days=10, min_valid_rows=100)
     ranking_rows = loader.fetch_all("normalized_market_rankings_daily", "base_date", latest, latest)
     master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
     master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
     mismatch_rows = 0
     q_prefix_rows = 0
-    kis_kospi_volume = 0
-    kis_kosdaq_volume = 0
+    volume_counts_by_source = {"KOSPI": {}, "KOSDAQ": {}, "ETF": {}, "ETN": {}}
+    volume_total = {"KOSPI": 0, "KOSDAQ": 0, "ETF": 0, "ETN": 0}
     trading_value_counts = {}
     market_cap_counts = {}
-    legacy_kis_rankings = 0
     for row in ranking_rows:
         symbol = row.get("symbol")
         if is_q_prefixed_numeric_symbol(symbol):
@@ -471,35 +490,77 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
         master_market = _standardize_market_value(master.get("market")) if master else None
         if ranking_market != "KOSPI200" and master and master_market != ranking_market:
             mismatch_rows += 1
-        if row.get("source") == "KIS" and row.get("rank_type") == "volume" and ranking_market == "KOSPI":
-            kis_kospi_volume += 1
-        if row.get("source") == "KIS" and row.get("rank_type") == "volume" and ranking_market == "KOSDAQ":
-            kis_kosdaq_volume += 1
+        if row.get("rank_type") == "volume" and ranking_market in volume_counts_by_source:
+            source = row.get("source") or "UNKNOWN"
+            volume_counts_by_source[ranking_market][source] = volume_counts_by_source[ranking_market].get(source, 0) + 1
+            volume_total[ranking_market] += 1
         if row.get("rank_type") == "trading_value":
             trading_value_counts[ranking_market] = trading_value_counts.get(ranking_market, 0) + 1
         if row.get("rank_type") == "market_cap":
             market_cap_counts[ranking_market] = market_cap_counts.get(ranking_market, 0) + 1
-        if row.get("source") == "KIS" and row.get("rank_type") in ("trading_value", "market_cap"):
-            legacy_kis_rankings += 1
     stale_days = _stale_days(latest, today)
     print(f"latest ranking date={latest}")
-    print(f"KIS KOSPI volume count={kis_kospi_volume}")
-    print(f"KIS KOSDAQ volume count={kis_kosdaq_volume}")
+    print(f"KOSPI volume count by source={volume_counts_by_source['KOSPI']}")
+    print(f"KOSDAQ volume count by source={volume_counts_by_source['KOSDAQ']}")
+    print(f"ETF volume count by source={volume_counts_by_source['ETF']}")
+    print(f"ETN volume count by source={volume_counts_by_source['ETN']}")
+    print(f"KOSDAQ volume total count={volume_total['KOSDAQ']}")
     print(f"trading_value ranking count by market={trading_value_counts}")
     print(f"market_cap ranking count by market={market_cap_counts}")
     print(f"market mismatch rows={mismatch_rows}")
     print(f"q_prefix rows={q_prefix_rows}")
     print(f"stale ranking rows={0 if stale_days is None else stale_days}")
-    if kis_kospi_volume == 0:
-        print("status=FAIL_KIS_KOSPI_VOLUME_RANK")
-    elif kis_kosdaq_volume == 0:
-        print("status=FAIL_KIS_KOSDAQ_VOLUME_RANK")
+    print(f"selected valid price date={quality.get('selected_price_base_date')}")
+    if volume_total["KOSDAQ"] == 0:
+        print("status=FAIL_KOSDAQ_VOLUME_RANK")
     elif mismatch_rows > 0:
         print("status=FAIL_RANKING_MARKET_MISMATCH")
     elif q_prefix_rows > 0:
         print("status=FAIL_SYMBOL_NORMALIZATION")
-    elif legacy_kis_rankings > 0:
-        print("status=WARN_LEGACY_KIS_RANKING")
+    elif volume_total["KOSPI"] < 20:
+        print("status=WARN_KOSPI_VOLUME_SPARSE")
+    elif volume_total["KOSDAQ"] < 20:
+        print("status=WARN_KOSDAQ_VOLUME_FALLBACK")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_macro_quality(loader: SupabaseLoader, today: date):
+    print("\n=== MACRO QUALITY ===")
+    latest = _latest(loader, "normalized_global_macro_daily", "base_date")
+    if not latest:
+        print("status=FAIL_GLOBAL_MACRO_EMPTY")
+        return
+    schema_ok = True
+    try:
+        row = (
+            loader.client.table("normalized_global_macro_daily")
+            .select("base_date, us10y, us3y, kr10y, dxy, usdkrw")
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+    except Exception as exc:
+        schema_ok = False
+        print(f"normalized_global_macro_daily latest base_date={latest}")
+        print(f"schema_error={exc}")
+        print("status=WARN_SCHEMA_US3Y_MISSING")
+        row = []
+    latest_row = row[0] if row else {}
+    dgs3 = fetch_latest_normalized_macro_value(loader, "DGS3", today)
+    print(f"normalized_global_macro_daily latest base_date={latest}")
+    print(f"us10y value={latest_row.get('us10y')}")
+    print(f"us3y value={latest_row.get('us3y')}")
+    print(f"kr10y value={latest_row.get('kr10y')}")
+    print(f"us3y null 여부={latest_row.get('us3y') is None}")
+    print(f"normalized_macro_series DGS3 latest value={dgs3.get('value') if dgs3 else None}")
+    if not schema_ok:
+        return
+    if not dgs3:
+        print("status=WARN_MACRO_DGS3_MISSING")
+    elif latest_row.get("us3y") is None:
+        print("status=WARN_MACRO_US3Y_NULL")
     else:
         print("status=SUCCESS")
 
@@ -614,6 +675,7 @@ def verify_data():
     _print_market_ranking_quality(loader)
     _print_market_master_quality(loader)
     _print_ranking_source_quality(loader, today)
+    _print_macro_quality(loader, today)
     _print_stock_detail_universe_quality(config, loader)
     _macro_series_status(loader, today)
 

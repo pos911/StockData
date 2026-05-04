@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 from src.utils.logger import get_logger
+from src.utils.market_data_quality import get_latest_valid_price_date
 from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
 from src.collectors.fred_collector import FREDCollector
 from src.normalizers.macro_normalizer import MacroNormalizer
@@ -26,8 +27,12 @@ def load_macro_series():
 
 
 def compute_market_breadth_from_prices(loader: SupabaseLoader, target_date: date):
+    quality = get_latest_valid_price_date(loader, target_date, lookback_days=10, min_valid_rows=100)
+    latest_valid_date = quality.get("selected_price_base_date")
+    if not latest_valid_date:
+        return None
     start_date = (target_date - timedelta(days=10)).strftime("%Y-%m-%d")
-    end_date = target_date.strftime("%Y-%m-%d")
+    end_date = latest_valid_date
     rows = loader.fetch_all(
         table_name="normalized_stock_prices_daily",
         date_col="base_date",
@@ -46,7 +51,7 @@ def compute_market_breadth_from_prices(loader: SupabaseLoader, target_date: date
     df["base_date"] = pd.to_datetime(df["base_date"]).dt.strftime("%Y-%m-%d")
     df["close_price"] = pd.to_numeric(df["close_price"], errors="coerce")
     df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
-    latest_date = df["base_date"].max()
+    latest_date = latest_valid_date
 
     advances = declines = unchanged = 0
     advancing_volume = declining_volume = 0
@@ -100,7 +105,37 @@ def fetch_latest_normalized_macro_value(loader: SupabaseLoader, series_id: str, 
     return None
 
 
-def run_pipeline(target_date: date):
+def fetch_latest_series_value_or_fred(
+    loader: SupabaseLoader,
+    fred: FREDCollector,
+    series_id: str,
+    target_date: date,
+    direct_lookback_days: int = 30,
+):
+    latest = fetch_latest_normalized_macro_value(loader, series_id, target_date)
+    if latest and latest.get("value") is not None:
+        try:
+            return float(latest["value"])
+        except (TypeError, ValueError):
+            pass
+    raw = fred.fetch_series(
+        series_id=series_id,
+        observation_start=(target_date - timedelta(days=direct_lookback_days)).strftime("%Y-%m-%d"),
+        sort_order="desc",
+        limit=30,
+    )
+    observations = raw.get("observations", []) if raw else []
+    for observation in observations:
+        value = observation.get("value")
+        if value not in (None, "", "."):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def run_pipeline(target_date: date, dry_run: bool = False):
     logger.info(f"Starting Daily Macro Pipeline up to {target_date}...")
 
     config = load_config()
@@ -120,11 +155,14 @@ def run_pipeline(target_date: date):
             "series_id": series.get("series_id") or series.get("endpoint_key"),
             "source": series.get("source"),
             "name": series.get("name"),
+            "name_ko": series.get("name_ko"),
+            "category": series.get("category"),
             "frequency": series.get("frequency"),
         }
         for series in series_list
     ]
-    loader.upsert_records("macro_series_master", master_records)
+    if not dry_run:
+        loader.upsert_records("macro_series_master", master_records)
 
     available_at = generate_available_at_for_eod(target_date)
     timestamp_now = get_current_kst()
@@ -154,7 +192,8 @@ def run_pipeline(target_date: date):
                     "collected_at": timestamp_now.isoformat(),
                     "available_at": available_at.isoformat(),
                 }
-                loader.upsert_records("raw_macro_series", [raw_record])
+                if not dry_run:
+                    loader.upsert_records("raw_macro_series", [raw_record])
 
                 norm_records = MacroNormalizer.normalize_fred(series_id, observations, available_at)
                 for record in norm_records:
@@ -163,7 +202,8 @@ def run_pipeline(target_date: date):
                         record.pop(key, None)
                     if record.get("value") is not None:
                         record["value"] = float(record["value"])
-                loader.upsert_records("normalized_macro_series", norm_records)
+                if not dry_run:
+                    loader.upsert_records("normalized_macro_series", norm_records)
                 total_processed += len(norm_records)
 
         elif source == "YAHOO":
@@ -195,8 +235,9 @@ def run_pipeline(target_date: date):
                         "value": close_val,
                         "available_at": available_at.isoformat(),
                     }
-                    loader.upsert_records("raw_macro_series", [raw_record])
-                    loader.upsert_records("normalized_macro_series", [norm_record])
+                    if not dry_run:
+                        loader.upsert_records("raw_macro_series", [raw_record])
+                        loader.upsert_records("normalized_macro_series", [norm_record])
                     total_processed += 1
             except Exception as exc:
                 logger.warning(f"Failed to fetch YAHOO series {series_id}: {exc}")
@@ -229,8 +270,9 @@ def run_pipeline(target_date: date):
                             "value": float(value),
                             "available_at": available_at.isoformat(),
                         }
-                        loader.upsert_records("raw_macro_series", [raw_record])
-                        loader.upsert_records("normalized_macro_series", [norm_record])
+                        if not dry_run:
+                            loader.upsert_records("raw_macro_series", [raw_record])
+                            loader.upsert_records("normalized_macro_series", [norm_record])
                         total_processed += 1
 
     from src.collectors.krx_collector import KRXCollector
@@ -272,6 +314,13 @@ def run_pipeline(target_date: date):
             except (ValueError, TypeError):
                 pass
 
+    us10y = global_data.get("us10y") if global_data else None
+    fred_us10y = fetch_latest_series_value_or_fred(loader, fred, "DGS10", target_date)
+    if us10y is None:
+        us10y = fred_us10y
+
+    us3y = fetch_latest_series_value_or_fred(loader, fred, "DGS3", target_date)
+
     ecos_usdkrw = fetch_latest_normalized_macro_value(loader, "USDKRW", target_date)
     if global_data and ecos_usdkrw and ecos_usdkrw.get("value") is not None:
         global_data["usdkrw"] = float(ecos_usdkrw["value"])
@@ -281,7 +330,8 @@ def run_pipeline(target_date: date):
             "base_date": global_data.get("base_date"),
             "usdkrw": global_data.get("usdkrw"),
             "dxy": global_data.get("dxy"),
-            "us10y": global_data.get("us10y"),
+            "us10y": us10y,
+            "us3y": us3y,
             "kr10y": kr10y,
             "kospi": global_data.get("kospi"),
             "kospi_change_rate": global_data.get("kospi_change_rate"),
@@ -314,12 +364,12 @@ def run_pipeline(target_date: date):
                 **breadth_data,
                 "available_at": available_at.isoformat(),
             }
-            if loader.upsert_records("market_breadth_daily", [breadth_record]):
+            if dry_run or loader.upsert_records("market_breadth_daily", [breadth_record]):
                 total_processed += 1
             else:
                 encountered_error = True
 
-        if loader.upsert_records("normalized_global_macro_daily", [global_record]):
+        if dry_run or loader.upsert_records("normalized_global_macro_daily", [global_record]):
             total_processed += 1
         else:
             encountered_error = True
@@ -327,13 +377,15 @@ def run_pipeline(target_date: date):
     status = "SUCCESS" if total_processed > 0 and not encountered_error else "WARN"
     if status != "SUCCESS":
         logger.warning(f"Macro Pipeline finished with warnings for {target_date}. processed={total_processed}")
-    loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), status, total_processed)
+    if not dry_run:
+        loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), status, total_processed)
     logger.info(f"Macro Pipeline Finished. status={status}, processed={total_processed}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, help="YYYYMMDD format")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     target_dt = get_current_kst().date()
@@ -342,4 +394,4 @@ if __name__ == "__main__":
 
         target_dt = parse_date_string(args.date)
 
-    run_pipeline(target_dt)
+    run_pipeline(target_dt, dry_run=args.dry_run)

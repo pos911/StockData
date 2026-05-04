@@ -10,6 +10,7 @@ from src.jobs.run_daily_stock_pipeline import (
     _should_skip_full_universe_price_ingestion,
 )
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
+from src.utils.market_data_quality import get_latest_valid_price_date
 
 
 def test_normalize_krx_etf_row():
@@ -284,3 +285,85 @@ def test_detail_universe_guardrail_keeps_limit_override():
 def test_full_universe_price_ingestion_guardrail_skip():
     assert _should_skip_full_universe_price_ingestion(2000) is True
     assert _should_skip_full_universe_price_ingestion(1999) is False
+
+
+class _PriceDateResult:
+    def __init__(self, data):
+        self.data = data
+
+
+class _PriceDateQuery:
+    def __init__(self, rows):
+        self.rows = rows
+        self.filters = {}
+        self._order_desc = False
+        self._limit = None
+
+    def select(self, *_args, **_kwargs):
+        return self
+
+    def gte(self, key, value):
+        self.filters.setdefault("gte", {})[key] = value
+        return self
+
+    def lte(self, key, value):
+        self.filters.setdefault("lte", {})[key] = value
+        return self
+
+    def eq(self, key, value):
+        self.filters.setdefault("eq", {})[key] = value
+        return self
+
+    def order(self, _key, desc=False):
+        self._order_desc = desc
+        return self
+
+    def limit(self, value):
+        self._limit = value
+        return self
+
+    def execute(self):
+        rows = list(self.rows)
+        for key, value in self.filters.get("eq", {}).items():
+            rows = [row for row in rows if row.get(key) == value]
+        for key, value in self.filters.get("gte", {}).items():
+            rows = [row for row in rows if row.get(key) >= value]
+        for key, value in self.filters.get("lte", {}).items():
+            rows = [row for row in rows if row.get(key) <= value]
+        if rows and "base_date" in rows[0]:
+            rows = sorted(rows, key=lambda row: row.get("base_date"), reverse=self._order_desc)
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        return _PriceDateResult(rows)
+
+
+class _PriceDateClient:
+    def __init__(self, table_map):
+        self.table_map = table_map
+
+    def table(self, name):
+        return _PriceDateQuery(self.table_map.get(name, []))
+
+
+class _PriceDateLoader:
+    def __init__(self, table_map):
+        self.client = _PriceDateClient(table_map)
+
+
+def test_latest_valid_price_date_prefers_latest_valid_not_simple_max():
+    loader = _PriceDateLoader(
+        {
+            "stocks_master": [
+                {"symbol": "005930", "market": "KOSPI", "asset_type": "STOCK"},
+                {"symbol": "000660", "market": "KOSPI", "asset_type": "STOCK"},
+            ],
+            "normalized_stock_prices_daily": [
+                {"symbol": "005930", "base_date": "2026-05-04", "close_price": None, "volume": None, "trading_value": None},
+                {"symbol": "000660", "base_date": "2026-05-04", "close_price": None, "volume": None, "trading_value": None},
+                {"symbol": "005930", "base_date": "2026-05-03", "close_price": 1, "volume": 10, "trading_value": 100},
+                {"symbol": "000660", "base_date": "2026-05-03", "close_price": 2, "volume": 20, "trading_value": 200},
+            ],
+        }
+    )
+    result = get_latest_valid_price_date(loader, __import__("datetime").date(2026, 5, 4), lookback_days=5, min_valid_rows=2)
+    assert result["selected_price_base_date"] == "2026-05-03"

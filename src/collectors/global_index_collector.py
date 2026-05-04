@@ -19,6 +19,7 @@ class GlobalIndexCollector:
             "usdkrw": "KRW=X",
             "dxy": "DX-Y.NYB",
             "us10y": "^TNX",
+            # us3y is sourced from FRED DGS3 in run_daily_macro_pipeline.py.
             "kospi": "^KS11",
             "kosdaq": "^KQ11",
             "nasdaq": "^IXIC",

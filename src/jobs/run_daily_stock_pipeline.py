@@ -13,6 +13,7 @@ from src.collectors.kis.domestic import KISDomesticStockCollector
 from src.collectors.kis.base import KISBaseCollector
 from src.collectors.kis.fundamentals import KISFundamentalsCollector
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
+from src.utils.market_data_quality import get_latest_valid_price_date
 from src.collectors.opendart_collector import OpenDartCollector
 from src.collectors.naver_news_collector import NaverNewsCollector
 from src.normalizers.stock_normalizer import StockNormalizer
@@ -555,18 +556,12 @@ def _infer_markets_from_supply_raw(loader: SupabaseLoader, base_date_str: str) -
     return market_map
 
 
-def _latest_valid_price_coverage(loader: SupabaseLoader) -> tuple[str | None, int]:
+def _latest_valid_price_coverage(loader: SupabaseLoader, target_date: date) -> tuple[str | None, int]:
     try:
-        latest_res = (
-            loader.client.table("normalized_stock_prices_daily")
-            .select("base_date")
-            .order("base_date", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not latest_res.data:
+        quality = get_latest_valid_price_date(loader, target_date, lookback_days=10, min_valid_rows=100)
+        latest_date = quality.get("selected_price_base_date")
+        if not latest_date:
             return None, 0
-        latest_date = latest_res.data[0]["base_date"]
         rows = (
             loader.client.table("normalized_stock_prices_daily")
             .select("symbol, close_price, volume, trading_value")
@@ -668,7 +663,7 @@ async def run_pipeline(target_date: date, limit: int = None):
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
     available_at = generate_available_at_for_eod(target_date)
     base_date_str = target_date.strftime("%Y-%m-%d")
-    latest_valid_price_date, latest_valid_price_count = _latest_valid_price_coverage(loader)
+    latest_valid_price_date, latest_valid_price_count = _latest_valid_price_coverage(loader, target_date)
     full_price_processed = 0
     if _should_skip_full_universe_price_ingestion(latest_valid_price_count):
         logger.info(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from collections import defaultdict
 from datetime import date
 from typing import Any
 
@@ -12,10 +13,25 @@ from src.collectors.kis.domestic import KISDomesticStockCollector
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
+from src.utils.market_data_quality import get_latest_valid_price_date
 from src.utils.symbols import normalize_symbol_value
 from src.utils.time_utils import generate_available_at_for_eod, get_current_kst, parse_date_string
 
 logger = get_logger(__name__)
+
+VOLUME_THRESHOLDS = {
+    "KOSPI": 20,
+    "KOSDAQ": 20,
+    "ETF": 10,
+    "ETN": 5,
+}
+
+RANKING_LIMITS = {
+    "KOSPI": 30,
+    "KOSDAQ": 30,
+    "ETF": 20,
+    "ETN": 20,
+}
 
 
 def _parse_numeric(value):
@@ -56,10 +72,19 @@ def _load_master_map(loader: SupabaseLoader) -> dict[str, dict[str, Any]]:
     return mapping
 
 
-def _delete_existing_rankings(loader: SupabaseLoader, base_date: str, market: str, rank_type: str, source: str) -> None:
-    for table_name in ("normalized_market_rankings_daily", "raw_market_rankings"):
-        query = loader.client.table(table_name).delete().eq("base_date", base_date).eq("market", market).eq("rank_type", rank_type).eq("source", source)
-        query.execute()
+def _delete_rankings(loader: SupabaseLoader, base_date: str, market: str, rank_type: str, sources: list[str] | None = None) -> None:
+    target_sources = sources or ["KIS", "VALID_PRICE_FALLBACK", "KRX"]
+    for source in target_sources:
+        for table_name in ("normalized_market_rankings_daily", "raw_market_rankings"):
+            query = (
+                loader.client.table(table_name)
+                .delete()
+                .eq("base_date", base_date)
+                .eq("market", market)
+                .eq("rank_type", rank_type)
+                .eq("source", source)
+            )
+            query.execute()
 
 
 def _persist_rankings(
@@ -69,10 +94,13 @@ def _persist_rankings(
     rank_type: str,
     source: str,
     rows: list[dict[str, Any]],
+    replace_existing: bool = True,
 ) -> int:
     base_date = target_date.strftime("%Y-%m-%d")
     available_at = generate_available_at_for_eod(target_date).isoformat()
-    _delete_existing_rankings(loader, base_date, market, rank_type, source)
+    if replace_existing:
+        _delete_rankings(loader, base_date, market, rank_type)
+
     raw_records = []
     normalized_records = []
     for rank, row in enumerate(rows, 1):
@@ -113,23 +141,28 @@ def _persist_rankings(
     return len(normalized_records)
 
 
-def _filter_kis_volume_rows(
-    rows: list[dict[str, Any]],
-    master_map: dict[str, dict[str, Any]],
-    target_market: str,
-) -> list[dict[str, Any]]:
-    filtered = []
-    dropped = 0
+def _classify_kis_volume_rows(rows: list[dict[str, Any]], master_map: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows or []:
         symbol = normalize_symbol_value(row.get("mksc_shrn_iscd") or row.get("symbol") or row.get("code"))
+        if not symbol:
+            continue
         master = master_map.get(symbol)
         if not master:
-            dropped += 1
             continue
-        if master.get("market") != target_market or master.get("asset_type") != "STOCK":
-            dropped += 1
+        market = master.get("market")
+        asset_type = master.get("asset_type")
+        if market == "KOSPI" and asset_type == "STOCK":
+            bucket = "KOSPI"
+        elif market == "KOSDAQ" and asset_type == "STOCK":
+            bucket = "KOSDAQ"
+        elif market == "ETF" and asset_type == "ETF":
+            bucket = "ETF"
+        elif market == "ETN" and asset_type == "ETN":
+            bucket = "ETN"
+        else:
             continue
-        filtered.append(
+        buckets[bucket].append(
             {
                 "symbol": symbol,
                 "name": master.get("name") or row.get("hts_kor_isnm") or symbol,
@@ -140,15 +173,26 @@ def _filter_kis_volume_rows(
                 "metric_value": _parse_numeric(row.get("acml_vol")),
                 "raw_data": {
                     "response_row": row,
-                    "master_market": master.get("market"),
-                    "master_asset_type": master.get("asset_type"),
+                    "master_market": market,
+                    "master_asset_type": asset_type,
                 },
             }
         )
-    if dropped:
-        logger.warning(f"Dropped {dropped} KIS volume-rank rows for target_market={target_market} after master validation.")
-    filtered.sort(key=lambda item: (item.get("metric_value") or 0), reverse=True)
-    return filtered
+    for market, bucket_rows in buckets.items():
+        bucket_rows.sort(
+            key=lambda item: ((item.get("volume") or 0), (item.get("trading_value") or 0)),
+            reverse=True,
+        )
+        buckets[market] = bucket_rows
+    return buckets
+
+
+def _filter_kis_volume_rows(
+    rows: list[dict[str, Any]],
+    master_map: dict[str, dict[str, Any]],
+    target_market: str,
+) -> list[dict[str, Any]]:
+    return _classify_kis_volume_rows(rows, master_map).get(target_market, [])
 
 
 def _build_price_based_rankings(
@@ -158,18 +202,14 @@ def _build_price_based_rankings(
     market: str,
     rank_type: str,
     limit: int,
-) -> tuple[str, list[dict[str, Any]]]:
-    latest_res = (
-        loader.client.table("normalized_stock_prices_daily")
-        .select("base_date")
-        .lte("base_date", target_date.strftime("%Y-%m-%d"))
-        .order("base_date", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not latest_res.data:
-        return "VALID_PRICE_FALLBACK", []
-    price_base_date = latest_res.data[0]["base_date"]
+    fallback_reason: str | None = None,
+    original_kis_count: int | None = None,
+) -> tuple[str, list[dict[str, Any]], str | None]:
+    quality = get_latest_valid_price_date(loader, target_date, lookback_days=10, min_valid_rows=100)
+    price_base_date = quality.get("selected_price_base_date")
+    if not price_base_date:
+        return "VALID_PRICE_FALLBACK", [], None
+
     rows = (
         loader.client.table("normalized_stock_prices_daily")
         .select("symbol, close_price, volume, trading_value, market_cap")
@@ -191,6 +231,10 @@ def _build_price_based_rankings(
         metric_value = row.get(metric_key)
         if metric_value in (None, ""):
             continue
+        if rank_type == "trading_value" and row.get("trading_value") in (None, ""):
+            continue
+        if rank_type == "market_cap" and row.get("market_cap") in (None, ""):
+            continue
         filtered.append(
             {
                 "symbol": symbol,
@@ -202,16 +246,62 @@ def _build_price_based_rankings(
                 "metric_value": metric_value,
                 "raw_data": {
                     "price_base_date": price_base_date,
+                    "ranking_base_date": target_date.strftime("%Y-%m-%d"),
+                    "fallback_reason": fallback_reason,
+                    "original_kis_count": original_kis_count,
                     "master_market": master.get("market"),
                     "master_asset_type": master.get("asset_type"),
                 },
             }
         )
-    filtered.sort(key=lambda item: (item.get("metric_value") or 0), reverse=True)
-    return source, filtered[:limit]
+    filtered.sort(
+        key=lambda item: ((item.get("metric_value") or 0), (item.get("trading_value") or 0)),
+        reverse=True,
+    )
+    if len(filtered) < limit:
+        logger.warning(
+            f"{market} {rank_type} ranking has only {len(filtered)} valid price candidates on price_base_date={price_base_date}"
+        )
+    return source, filtered[:limit], price_base_date
 
 
-async def run_pipeline(target_date: date) -> None:
+def _select_volume_rankings(
+    loader: SupabaseLoader,
+    target_date: date,
+    market: str,
+    kis_rows: list[dict[str, Any]],
+    master_map: dict[str, dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    threshold = VOLUME_THRESHOLDS[market]
+    limit = RANKING_LIMITS[market]
+    if len(kis_rows) >= threshold:
+        return "KIS", kis_rows[:limit]
+
+    logger.warning(
+        f"{market} KIS volume ranking is sparse: count={len(kis_rows)}, threshold={threshold}. "
+        "Replacing with valid price fallback."
+    )
+    source, rows, _price_base_date = _build_price_based_rankings(
+        loader=loader,
+        target_date=target_date,
+        master_map=master_map,
+        market=market,
+        rank_type="volume",
+        limit=limit,
+        fallback_reason="kis_volume_sparse",
+        original_kis_count=len(kis_rows),
+    )
+    if rows:
+        return source, rows
+    if kis_rows:
+        logger.warning(
+            f"{market} valid price fallback returned 0 rows; retaining sparse KIS volume rows instead."
+        )
+        return "KIS", kis_rows[:limit]
+    return source, rows
+
+
+async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
     logger.info(f"Starting daily ranking pipeline for {target_date:%Y-%m-%d}")
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
@@ -223,36 +313,46 @@ async def run_pipeline(target_date: date) -> None:
     collector = KISDomesticStockCollector(config, auth_mgr, semaphore)
 
     try:
-        kospi_rows = await collector.fetch_volume_rank(market_code="K")
-        kospi_filtered = _filter_kis_volume_rows(kospi_rows, master_map, "KOSPI")
-        if len(kospi_filtered) < 20:
-            logger.warning(f"KIS market_code=K returned only {len(kospi_filtered)} valid KOSPI rows; trying J fallback.")
-            kospi_filtered = _filter_kis_volume_rows(await collector.fetch_volume_rank(market_code="J"), master_map, "KOSPI")
+        kis_j_rows = await collector.fetch_volume_rank(market_code="J")
+        classified = _classify_kis_volume_rows(kis_j_rows, master_map)
+        ranking_total = 0
 
-        kosdaq_filtered = _filter_kis_volume_rows(await collector.fetch_volume_rank(market_code="Q"), master_map, "KOSDAQ")
+        for market in ("KOSPI", "KOSDAQ", "ETF", "ETN"):
+            source, volume_rows = _select_volume_rankings(
+                loader=loader,
+                target_date=target_date,
+                market=market,
+                kis_rows=classified.get(market, []),
+                master_map=master_map,
+            )
+            if not dry_run:
+                ranking_total += _persist_rankings(loader, target_date, market, "volume", source, volume_rows)
+            else:
+                logger.info(f"[dry-run] {market} volume source={source} rows={len(volume_rows)}")
 
-        kospi_count = _persist_rankings(loader, target_date, "KOSPI", "volume", "KIS", kospi_filtered[:30])
-        kosdaq_count = _persist_rankings(loader, target_date, "KOSDAQ", "volume", "KIS", kosdaq_filtered[:30])
+        for market, limit in RANKING_LIMITS.items():
+            source, rows, price_base_date = _build_price_based_rankings(
+                loader, target_date, master_map, market, "trading_value", limit
+            )
+            logger.info(f"{market} trading_value ranking price_base_date={price_base_date} source={source} rows={len(rows)}")
+            if not dry_run:
+                _persist_rankings(loader, target_date, market, "trading_value", source, rows)
 
-        if kospi_count < 20:
-            logger.warning(f"KOSPI volume ranking has fewer than 20 validated rows: {kospi_count}")
-        if kosdaq_count < 20:
-            logger.warning(f"KOSDAQ volume ranking has fewer than 20 validated rows: {kosdaq_count}")
+        for market, limit in RANKING_LIMITS.items():
+            source, rows, price_base_date = _build_price_based_rankings(
+                loader, target_date, master_map, market, "market_cap", limit
+            )
+            logger.info(f"{market} market_cap ranking price_base_date={price_base_date} source={source} rows={len(rows)}")
+            if not dry_run:
+                _persist_rankings(loader, target_date, market, "market_cap", source, rows)
 
-        for market, limit in (("KOSPI", 30), ("KOSDAQ", 30), ("ETF", 20), ("ETN", 20)):
-            source, rows = _build_price_based_rankings(loader, target_date, master_map, market, "trading_value", limit)
-            _persist_rankings(loader, target_date, market, "trading_value", source, rows)
-
-        for market, limit in (("KOSPI", 30), ("KOSDAQ", 30), ("ETF", 20), ("ETN", 20)):
-            source, rows = _build_price_based_rankings(loader, target_date, master_map, market, "market_cap", limit)
-            _persist_rankings(loader, target_date, market, "market_cap", source, rows)
-
-        loader.insert_log(
-            "daily_ranking_pipeline",
-            target_date.strftime("%Y-%m-%d"),
-            "SUCCESS",
-            kospi_count + kosdaq_count,
-        )
+        if not dry_run:
+            loader.insert_log(
+                "daily_ranking_pipeline",
+                target_date.strftime("%Y-%m-%d"),
+                "SUCCESS",
+                ranking_total,
+            )
     finally:
         await auth_mgr.shutdown()
         await KISBaseCollector.close_session()
@@ -261,8 +361,9 @@ async def run_pipeline(target_date: date) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, help="YYYYMMDD format (default: today)")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     target_dt = get_current_kst().date()
     if args.date:
         target_dt = parse_date_string(args.date)
-    asyncio.run(run_pipeline(target_dt))
+    asyncio.run(run_pipeline(target_dt, dry_run=args.dry_run))

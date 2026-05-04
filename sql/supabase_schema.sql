@@ -302,6 +302,7 @@ CREATE TABLE IF NOT EXISTS normalized_global_macro_daily (
     usdkrw NUMERIC,
     dxy NUMERIC,
     us10y NUMERIC,
+    us3y NUMERIC,
     kr10y NUMERIC,
     kospi NUMERIC,
     kospi_change_rate NUMERIC,

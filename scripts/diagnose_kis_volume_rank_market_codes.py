@@ -25,10 +25,15 @@ async def main():
     await auth_mgr.initialize()
     collector = KISDomesticStockCollector(config, auth_mgr, asyncio.Semaphore(2))
     try:
+        print("production_path=J only")
         for market_code in ["J", "K", "Q"]:
-            rows = await collector.fetch_volume_rank(market_code=market_code)
             print(f"\n=== market_code={market_code} ===")
-            print(f"row_count={len(rows or [])}")
+            try:
+                rows = await collector.fetch_volume_rank(market_code=market_code)
+            except Exception as exc:
+                print(f"status=INVALID_OR_FAILED error={exc}")
+                continue
+            print(f"status=OK row_count={len(rows or [])}")
             sample = []
             dist = Counter()
             for row in rows or []:
