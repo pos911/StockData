@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from src.jobs import run_daily_macro_pipeline as macro_module
+from src.jobs import run_daily_master_pipeline as master_module
 from src.jobs import run_daily_ranking_pipeline as ranking_module
 
 
@@ -158,6 +159,54 @@ def test_trading_value_and_market_cap_rankings_use_valid_price_date():
     )
     assert price_base_date2 == "2026-05-03"
     assert rows2[0]["metric_value"] == 9999
+
+
+def test_etf_rankings_can_use_market_specific_price_fallback_date():
+    stock_rows = [
+        {"symbol": f"{i:06d}", "market": "KOSPI", "asset_type": "STOCK", "name": f"Name{i}"}
+        for i in range(300000, 300099)
+    ]
+    price_rows = [
+        {"symbol": f"{i:06d}", "base_date": "2026-05-04", "close_price": 1, "volume": 10, "trading_value": 100, "market_cap": 10}
+        for i in range(300000, 300099)
+    ]
+    loader = _Loader(
+        {
+            "stocks_master": stock_rows + [
+                {"symbol": "069500", "market": "ETF", "asset_type": "ETF", "name": "KODEX 200"},
+            ],
+            "normalized_stock_prices_daily": price_rows + [
+                {"symbol": "069500", "base_date": "2026-04-28", "close_price": 3, "volume": 150, "trading_value": 2500, "market_cap": 30},
+            ],
+        }
+    )
+    master_map = ranking_module._load_master_map(loader)
+    source, rows, price_base_date = ranking_module._build_price_based_rankings(
+        loader, __import__("datetime").date(2026, 5, 4), master_map, "ETF", "trading_value", 20
+    )
+    assert source == "VALID_PRICE_FALLBACK"
+    assert price_base_date == "2026-04-28"
+    assert [row["symbol"] for row in rows] == ["069500"]
+    assert rows[0]["raw_data"]["price_base_date"] == "2026-04-28"
+
+
+def test_etp_lookback_uses_recent_krx_data():
+    class FakeKRX:
+        def fetch_etf_daily_trading(self, target_date):
+            if target_date.strftime("%Y-%m-%d") == "2026-05-04":
+                return []
+            if target_date.strftime("%Y-%m-%d") == "2026-04-28":
+                return [{"ISU_CD": "069500", "ISU_NM": "KODEX 200", "TDD_CLSPRC": "10000"}]
+            return []
+
+        def fetch_etn_daily_trading(self, _target_date):
+            return []
+
+    rows, used_date = master_module._fetch_etp_rows_with_lookback(
+        FakeKRX(), __import__("datetime").date(2026, 5, 4), "ETF"
+    )
+    assert used_date.strftime("%Y-%m-%d") == "2026-04-28"
+    assert rows == [{"ISU_CD": "069500", "ISU_NM": "KODEX 200", "TDD_CLSPRC": "10000"}]
 
 
 def test_run_daily_ranking_pipeline_uses_j_only(monkeypatch):

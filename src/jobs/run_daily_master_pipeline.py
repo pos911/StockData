@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 
 from src.collectors.krx_collector import KRXCollector
 from src.loaders.supabase_loader import SupabaseLoader
@@ -15,6 +15,14 @@ from src.utils.time_utils import generate_available_at_for_eod, get_current_kst,
 logger = get_logger(__name__)
 
 MASTER_MARKETS = {"KOSPI", "KOSDAQ", "ETF", "ETN"}
+ETP_LOOKBACK_DAYS = 10
+
+
+def _has_meaningful_etp_prices(rows: list[dict]) -> bool:
+    for row in rows:
+        if any(row.get(field) not in (None, "", "-") for field in ("TDD_CLSPRC", "ACC_TRDVOL", "ACC_TRDVAL", "MKTCAP")):
+            return True
+    return False
 
 
 def _raw_price_record(row: dict, target_date: date) -> dict:
@@ -153,6 +161,30 @@ def _collect_krx_etp_master_and_prices(
     return master_rows, raw_price_rows, normalized_price_rows
 
 
+def _fetch_etp_rows_with_lookback(krx: KRXCollector, target_date: date, market: str) -> tuple[list[dict], date | None]:
+    fetcher = krx.fetch_etf_daily_trading if market == "ETF" else krx.fetch_etn_daily_trading
+    for offset in range(0, ETP_LOOKBACK_DAYS + 1):
+        query_date = target_date - timedelta(days=offset)
+        rows = fetcher(query_date)
+        if rows and _has_meaningful_etp_prices(rows):
+            if offset > 0:
+                logger.warning(
+                    f"{market} KRX ETP data missing on {target_date:%Y-%m-%d}; "
+                    f"falling back to {query_date:%Y-%m-%d} with {len(rows)} rows."
+                )
+            return rows, query_date
+        if rows and not _has_meaningful_etp_prices(rows):
+            logger.warning(
+                f"{market} KRX ETP returned {len(rows)} rows on {query_date:%Y-%m-%d} "
+                "but price fields were blank; continuing lookback."
+            )
+    logger.warning(
+        f"{market} KRX ETP data unavailable for {target_date:%Y-%m-%d} and prior "
+        f"{ETP_LOOKBACK_DAYS} days."
+    )
+    return [], None
+
+
 def _load_static_enabled_symbols(loader: SupabaseLoader) -> set[str]:
     try:
         rows = (
@@ -211,14 +243,14 @@ def run_pipeline(target_date: date) -> None:
     existing_active_map = _load_existing_active_map(loader)
 
     stock_master_rows = _collect_krx_stock_master(krx, target_date, existing_active_map, protected_symbols)
-    etf_rows = krx.fetch_etf_daily_trading(target_date)
-    etn_rows = krx.fetch_etn_daily_trading(target_date)
+    etf_rows, etf_data_date = _fetch_etp_rows_with_lookback(krx, target_date, "ETF")
+    etn_rows, etn_data_date = _fetch_etp_rows_with_lookback(krx, target_date, "ETN")
 
     etf_master_rows, etf_raw_prices, etf_normalized_prices = _collect_krx_etp_master_and_prices(
-        krx, target_date, "ETF", "ETF", etf_rows, existing_active_map, protected_symbols
+        krx, etf_data_date or target_date, "ETF", "ETF", etf_rows, existing_active_map, protected_symbols
     )
     etn_master_rows, etn_raw_prices, etn_normalized_prices = _collect_krx_etp_master_and_prices(
-        krx, target_date, "ETN", "ETN", etn_rows, existing_active_map, protected_symbols
+        krx, etn_data_date or target_date, "ETN", "ETN", etn_rows, existing_active_map, protected_symbols
     )
 
     all_master_rows = stock_master_rows + etf_master_rows + etn_master_rows
@@ -255,6 +287,8 @@ def run_pipeline(target_date: date) -> None:
     logger.info(f"KOSDAQ count: {counter.get('KOSDAQ', 0)}")
     logger.info(f"ETF count: {counter.get('ETF', 0)}")
     logger.info(f"ETN count: {counter.get('ETN', 0)}")
+    logger.info(f"ETF price rows: raw={len(etf_raw_prices)} normalized={len(etf_normalized_prices)} data_date={etf_data_date}")
+    logger.info(f"ETN price rows: raw={len(etn_raw_prices)} normalized={len(etn_normalized_prices)} data_date={etn_data_date}")
     logger.info(f"total master count: {len(master_rows)}")
     logger.info(f"duplicate symbol count: {duplicate_count}")
     logger.info(f"unknown market count: {unknown_market_count}")

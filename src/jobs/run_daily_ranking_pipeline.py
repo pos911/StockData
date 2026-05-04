@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from src.collectors.kis.auth import KISAuthManager
@@ -207,53 +207,95 @@ def _build_price_based_rankings(
 ) -> tuple[str, list[dict[str, Any]], str | None]:
     quality = get_latest_valid_price_date(loader, target_date, lookback_days=10, min_valid_rows=100)
     price_base_date = quality.get("selected_price_base_date")
-    if not price_base_date:
-        return "VALID_PRICE_FALLBACK", [], None
 
-    rows = (
-        loader.client.table("normalized_stock_prices_daily")
-        .select("symbol, close_price, volume, trading_value, market_cap")
-        .eq("base_date", price_base_date)
-        .execute()
-        .data
-        or []
-    )
-    metric_key = rank_type
-    source = "KRX" if market in {"ETF", "ETN"} and price_base_date == target_date.strftime("%Y-%m-%d") else "VALID_PRICE_FALLBACK"
-    filtered = []
-    for row in rows:
-        symbol = normalize_symbol_value(row.get("symbol"))
-        master = master_map.get(symbol)
-        if not master:
-            continue
-        if master.get("market") != market:
-            continue
-        metric_value = row.get(metric_key)
-        if metric_value in (None, ""):
-            continue
-        if rank_type == "trading_value" and row.get("trading_value") in (None, ""):
-            continue
-        if rank_type == "market_cap" and row.get("market_cap") in (None, ""):
-            continue
-        filtered.append(
-            {
-                "symbol": symbol,
-                "name": master.get("name") or symbol,
-                "volume": row.get("volume"),
-                "trading_value": row.get("trading_value"),
-                "market_cap": row.get("market_cap"),
-                "change_rate": None,
-                "metric_value": metric_value,
-                "raw_data": {
-                    "price_base_date": price_base_date,
-                    "ranking_base_date": target_date.strftime("%Y-%m-%d"),
-                    "fallback_reason": fallback_reason,
-                    "original_kis_count": original_kis_count,
-                    "master_market": master.get("market"),
-                    "master_asset_type": master.get("asset_type"),
-                },
-            }
+    def _load_rows(base_date: str):
+        return (
+            loader.client.table("normalized_stock_prices_daily")
+            .select("symbol, close_price, volume, trading_value, market_cap")
+            .eq("base_date", base_date)
+            .execute()
+            .data
+            or []
         )
+
+    def _filter_rows(rows: list[dict[str, Any]], row_base_date: str):
+        metric_key = rank_type
+        filtered_local = []
+        for row in rows:
+            symbol = normalize_symbol_value(row.get("symbol"))
+            master = master_map.get(symbol)
+            if not master:
+                continue
+            if master.get("market") != market:
+                continue
+            metric_value = row.get(metric_key)
+            if metric_value in (None, ""):
+                continue
+            if rank_type == "volume" and row.get("volume") in (None, ""):
+                continue
+            if rank_type == "trading_value" and row.get("trading_value") in (None, ""):
+                continue
+            if rank_type == "market_cap" and row.get("market_cap") in (None, ""):
+                continue
+            filtered_local.append(
+                {
+                    "symbol": symbol,
+                    "name": master.get("name") or symbol,
+                    "volume": row.get("volume"),
+                    "trading_value": row.get("trading_value"),
+                    "market_cap": row.get("market_cap"),
+                    "change_rate": None,
+                    "metric_value": metric_value,
+                    "raw_data": {
+                        "price_base_date": row_base_date,
+                        "ranking_base_date": target_date.strftime("%Y-%m-%d"),
+                        "fallback_reason": fallback_reason,
+                        "original_kis_count": original_kis_count,
+                        "master_market": master.get("market"),
+                        "master_asset_type": master.get("asset_type"),
+                    },
+                }
+            )
+        return filtered_local
+    candidate_dates = []
+    if price_base_date:
+        candidate_dates.append(price_base_date)
+    additional_dates = sorted(
+        {
+            str(row.get("base_date"))
+            for row in (
+                loader.client.table("normalized_stock_prices_daily")
+                .select("base_date")
+                .lte("base_date", target_date.strftime("%Y-%m-%d"))
+                .gte("base_date", (target_date - timedelta(days=10)).strftime("%Y-%m-%d"))
+                .execute()
+                .data
+                or []
+            )
+            if row.get("base_date")
+        },
+        reverse=True,
+    )
+    candidate_dates.extend([candidate for candidate in additional_dates if candidate not in candidate_dates])
+
+    filtered = []
+    selected_from_market_specific = False
+    for candidate_date in candidate_dates:
+        candidate_rows = _load_rows(candidate_date)
+        candidate_filtered = _filter_rows(candidate_rows, candidate_date)
+        if candidate_filtered:
+            selected_from_market_specific = candidate_date != price_base_date
+            price_base_date = candidate_date
+            filtered = candidate_filtered
+            break
+    if selected_from_market_specific:
+        logger.warning(
+            f"{market} {rank_type} using market-specific price fallback date {price_base_date} "
+            f"instead of selected global date {quality.get('selected_price_base_date')}."
+        )
+    if not filtered:
+        return "VALID_PRICE_FALLBACK", [], None
+    source = "KRX" if market in {"ETF", "ETN"} and price_base_date == target_date.strftime("%Y-%m-%d") else "VALID_PRICE_FALLBACK"
     filtered.sort(
         key=lambda item: ((item.get("metric_value") or 0), (item.get("trading_value") or 0)),
         reverse=True,
