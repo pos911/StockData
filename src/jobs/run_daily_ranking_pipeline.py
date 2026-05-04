@@ -209,14 +209,7 @@ def _build_price_based_rankings(
     price_base_date = quality.get("selected_price_base_date")
 
     def _load_rows(base_date: str):
-        return (
-            loader.client.table("normalized_stock_prices_daily")
-            .select("symbol, close_price, volume, trading_value, market_cap")
-            .eq("base_date", base_date)
-            .execute()
-            .data
-            or []
-        )
+        return loader.fetch_all("normalized_stock_prices_daily", "base_date", base_date, base_date)
 
     def _filter_rows(rows: list[dict[str, Any]], row_base_date: str):
         metric_key = rank_type
@@ -263,14 +256,11 @@ def _build_price_based_rankings(
     additional_dates = sorted(
         {
             str(row.get("base_date"))
-            for row in (
-                loader.client.table("normalized_stock_prices_daily")
-                .select("base_date")
-                .lte("base_date", target_date.strftime("%Y-%m-%d"))
-                .gte("base_date", (target_date - timedelta(days=10)).strftime("%Y-%m-%d"))
-                .execute()
-                .data
-                or []
+            for row in loader.fetch_all(
+                "normalized_stock_prices_daily",
+                "base_date",
+                (target_date - timedelta(days=10)).strftime("%Y-%m-%d"),
+                target_date.strftime("%Y-%m-%d"),
             )
             if row.get("base_date")
         },

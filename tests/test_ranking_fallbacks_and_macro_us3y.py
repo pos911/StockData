@@ -99,6 +99,14 @@ class _Loader:
     def insert_log(self, *args):
         self.logs.append(args)
 
+    def fetch_all(self, table, date_column, start_date, end_date):
+        rows = list(self.table_map.get(table, []))
+        return [
+            row
+            for row in rows
+            if start_date <= row.get(date_column, "") <= end_date
+        ]
+
 
 def test_kosdaq_volume_fallback_is_generated_from_valid_price():
     stock_rows = [{"symbol": f"{i:06d}", "market": "KOSPI", "asset_type": "STOCK", "name": f"Name{i}"} for i in range(100000, 100099)]
