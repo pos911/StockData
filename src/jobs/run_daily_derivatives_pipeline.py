@@ -5,6 +5,7 @@ from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
 from src.collectors.derivatives_collector import DerivativesCollector
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
+from src.utils.trading_calendar import get_previous_trading_day, should_skip_market_job
 
 logger = get_logger(__name__)
 
@@ -13,6 +14,22 @@ def run_pipeline(target_date: date):
     
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
+    skip, reason = should_skip_market_job(loader, target_date, "XKRX", "daily_derivatives_pipeline")
+    if skip:
+        previous_trading_day = get_previous_trading_day(loader, target_date, "XKRX")
+        message = (
+            f"XKRX market closed on {target_date:%Y-%m-%d}; skipped Korean market data ingestion. "
+            f"previous_trading_day={previous_trading_day} reason={reason}"
+        )
+        logger.warning(message)
+        loader.insert_log(
+            "daily_derivatives_pipeline",
+            target_date.strftime("%Y-%m-%d"),
+            "SKIPPED_MARKET_CLOSED",
+            0,
+            message,
+        )
+        return
     collector = DerivativesCollector()
     
     available_at = generate_available_at_for_eod(target_date)

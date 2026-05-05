@@ -7,7 +7,7 @@ from typing import Any
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.logger import get_logger
 from src.utils.symbols import normalize_symbol_value
-from src.utils.trading_calendar import get_trading_days_between
+from src.utils.trading_calendar import get_latest_trading_day_on_or_before, get_trading_days_between
 
 logger = get_logger(__name__)
 
@@ -64,9 +64,14 @@ def get_latest_valid_price_date(
     target_date: date | str,
     lookback_days: int = 10,
     min_valid_rows: int = 100,
+    exchange_code: str = "XKRX",
 ) -> dict[str, Any]:
     target_date_str = target_date.strftime("%Y-%m-%d") if hasattr(target_date, "strftime") else str(target_date)[:10]
     target_dt = date.fromisoformat(target_date_str)
+    latest_trading_day = get_latest_trading_day_on_or_before(loader, target_dt, exchange_code=exchange_code)
+    if latest_trading_day is not None:
+        target_dt = latest_trading_day
+        target_date_str = latest_trading_day.isoformat()
     start_dt = target_dt - timedelta(days=max(lookback_days * 3, 14))
 
     date_rows = _fetch_rows(
@@ -82,7 +87,7 @@ def get_latest_valid_price_date(
     seen = set()
     trading_day_set = {
         trading_day.isoformat()
-        for trading_day in get_trading_days_between(loader, start_dt, target_dt, exchange_code="XKRX")
+        for trading_day in get_trading_days_between(loader, start_dt, target_dt, exchange_code=exchange_code)
     }
     for row in date_rows:
         base_date = str(row.get("base_date") or "")[:10]

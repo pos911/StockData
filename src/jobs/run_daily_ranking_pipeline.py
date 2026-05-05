@@ -16,6 +16,7 @@ from src.utils.logger import get_logger
 from src.utils.market_data_quality import get_latest_valid_price_date
 from src.utils.symbols import normalize_symbol_value
 from src.utils.time_utils import generate_available_at_for_eod, get_current_kst, parse_date_string
+from src.utils.trading_calendar import get_previous_trading_day, should_skip_market_job
 
 logger = get_logger(__name__)
 
@@ -337,6 +338,23 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
     logger.info(f"Starting daily ranking pipeline for {target_date:%Y-%m-%d}")
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
+    skip, reason = should_skip_market_job(loader, target_date, "XKRX", "daily_ranking_pipeline")
+    if skip:
+        previous_trading_day = get_previous_trading_day(loader, target_date, "XKRX")
+        message = (
+            f"XKRX market closed on {target_date:%Y-%m-%d}; skipped Korean market data ingestion. "
+            f"previous_trading_day={previous_trading_day} reason={reason}"
+        )
+        logger.warning(message)
+        if not dry_run:
+            loader.insert_log(
+                "daily_ranking_pipeline",
+                target_date.strftime("%Y-%m-%d"),
+                "SKIPPED_MARKET_CLOSED",
+                0,
+                message,
+            )
+        return
     master_map = _load_master_map(loader)
 
     auth_mgr = KISAuthManager(config)

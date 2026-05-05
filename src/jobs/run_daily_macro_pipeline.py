@@ -12,6 +12,10 @@ from src.collectors.fred_collector import FREDCollector
 from src.normalizers.macro_normalizer import MacroNormalizer
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
+from src.utils.trading_calendar import (
+    get_previous_trading_day,
+    should_skip_market_job,
+)
 
 logger = get_logger(__name__)
 
@@ -24,6 +28,16 @@ except ImportError:
 def load_macro_series():
     with open("config/macro_series.json", "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+US_EQUITY_FIELDS = (
+    "sp500",
+    "sp500_change_rate",
+    "nasdaq",
+    "nasdaq_change_rate",
+    "sox",
+    "vix",
+)
 
 
 def compute_market_breadth_from_prices(loader: SupabaseLoader, target_date: date):
@@ -133,6 +147,51 @@ def fetch_latest_series_value_or_fred(
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _apply_us_equity_market_guardrail(
+    loader: SupabaseLoader,
+    global_index,
+    global_data: dict | None,
+    target_date: date,
+) -> tuple[dict | None, dict]:
+    diagnostic = {
+        "us_equity_market_closed": False,
+        "us_equity_market_data_date": target_date.strftime("%Y-%m-%d"),
+        "reason": "MARKET_OPEN",
+    }
+    if global_data is None:
+        return global_data, diagnostic
+
+    skip, reason = should_skip_market_job(loader, target_date, "XNYS", "daily_macro_pipeline")
+    if not skip:
+        return global_data, diagnostic
+
+    previous_us_day = get_previous_trading_day(loader, target_date, "XNYS")
+    diagnostic = {
+        "us_equity_market_closed": True,
+        "us_equity_market_data_date": previous_us_day.isoformat() if previous_us_day else None,
+        "reason": reason,
+    }
+    logger.warning(
+        f"XNYS closed on {target_date:%Y-%m-%d}; carrying forward US equity indicators "
+        f"from previous trading day={previous_us_day}. reason={reason}"
+    )
+
+    if previous_us_day is None:
+        return global_data, diagnostic
+
+    previous_data = global_index.fetch_daily_indices(previous_us_day)
+    if not previous_data:
+        logger.warning(
+            f"Failed to fetch previous US trading day indices for {previous_us_day}; "
+            "keeping current global_data payload unchanged."
+        )
+        return global_data, diagnostic
+
+    for field in US_EQUITY_FIELDS:
+        global_data[field] = previous_data.get(field)
+    return global_data, diagnostic
 
 
 def run_pipeline(target_date: date, dry_run: bool = False):
@@ -284,8 +343,21 @@ def run_pipeline(target_date: date, dry_run: bool = False):
 
     from src.collectors.global_index_collector import GlobalIndexCollector
 
+    us_skip, us_reason = should_skip_market_job(loader, target_date, "XNYS", "daily_macro_pipeline")
+    us_skip_fields = {"sp500", "nasdaq", "sox", "vix"} if us_skip else set()
     global_index = GlobalIndexCollector(config)
-    global_data = global_index.fetch_daily_indices(target_date)
+    try:
+        global_data = global_index.fetch_daily_indices(target_date, skip_fields=us_skip_fields)
+    except TypeError:
+        global_data = global_index.fetch_daily_indices(target_date)
+    global_data, us_equity_diagnostic = _apply_us_equity_market_guardrail(
+        loader=loader,
+        global_index=global_index,
+        global_data=global_data,
+        target_date=target_date,
+    )
+    if us_skip:
+        us_equity_diagnostic["reason"] = us_reason
 
     hy_spread = None
     raw_hy = fred.fetch_series(series_id="BAMLH0A0HYM2", observation_start=target_date.strftime("%Y-%m-%d"), limit=1)
@@ -357,6 +429,12 @@ def run_pipeline(target_date: date, dry_run: bool = False):
             "kosdaq_institutional_net_buy": global_data.get("kosdaq_institutional_net_buy"),
             "available_at": available_at.isoformat(),
         }
+        logger.info(
+            "US equity market diagnostic: "
+            f"closed={us_equity_diagnostic.get('us_equity_market_closed')} "
+            f"source_date={us_equity_diagnostic.get('us_equity_market_data_date')} "
+            f"reason={us_equity_diagnostic.get('reason')}"
+        )
 
         if breadth_data:
             breadth_record = {
@@ -378,7 +456,20 @@ def run_pipeline(target_date: date, dry_run: bool = False):
     if status != "SUCCESS":
         logger.warning(f"Macro Pipeline finished with warnings for {target_date}. processed={total_processed}")
     if not dry_run:
-        loader.insert_log("daily_macro_pipeline", target_date.strftime("%Y-%m-%d"), status, total_processed)
+        error_message = ""
+        if us_equity_diagnostic.get("us_equity_market_closed"):
+            error_message = (
+                f"XNYS closed; carried forward US equity indicators from "
+                f"{us_equity_diagnostic.get('us_equity_market_data_date')} "
+                f"reason={us_equity_diagnostic.get('reason')}"
+            )
+        loader.insert_log(
+            "daily_macro_pipeline",
+            target_date.strftime("%Y-%m-%d"),
+            status,
+            total_processed,
+            error_message,
+        )
     logger.info(f"Macro Pipeline Finished. status={status}, processed={total_processed}")
 
 

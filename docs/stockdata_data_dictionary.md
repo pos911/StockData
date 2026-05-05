@@ -588,7 +588,7 @@ us10y_us3y_spread_bp = (us10y - us3y) * 100
 ## 3.21 `market_trading_calendar`
 
 ### 목적
-한국거래소 거래일/휴장일 캘린더를 일자 단위로 저장한다. 이 테이블은 latest valid price date 선택, ranking fallback, report 기준일 보정, backtest 거래일 계산에 공통으로 사용한다.
+한국거래소와 미국 주식시장 거래일/휴장일 캘린더를 일자 단위로 저장한다. 이 테이블은 latest valid price date 선택, ranking fallback, report 기준일 보정, backtest 거래일 계산, 휴장일 수집 skip guardrail에 공통으로 사용한다.
 
 ### Primary Key
 - `(calendar_date, exchange_code)`
@@ -596,8 +596,8 @@ us10y_us3y_spread_bp = (us10y - us3y) * 100
 | 컬럼 | 의미 | 예시 | 주의사항 |
 |---|---|---|---|
 | calendar_date | 거래소 로컬 기준 날짜 | 2026-05-04 | KST 기준 거래일 |
-| exchange_code | 거래소 캘린더 코드 | XKRX | pandas-market-calendars에서 선택된 calendar name |
-| market | 논리 시장명 | KRX | 현재 구현은 KRX 단일 |
+| exchange_code | 거래소 캘린더 코드 | XKRX, XNYS | pandas-market-calendars에서 선택된 calendar name |
+| market | 논리 시장명 | KRX, US | XKRX는 한국시장, XNYS/XNAS는 미국시장 |
 | is_open | 거래일 여부 | true / false | 거래일이면 true, 주말/휴장일이면 false |
 | open_time | 개장 시각 | 2026-05-04T09:00:00+09:00 | 거래일에만 값 존재 가능 |
 | close_time | 폐장 시각 | 2026-05-04T15:30:00+09:00 | 거래일에만 값 존재 가능 |
@@ -611,21 +611,28 @@ us10y_us3y_spread_bp = (us10y - us3y) * 100
 
 ### 갱신 정책
 - 월 1회 `monthly_market_calendar_sync.yml`에서 갱신한다.
+- 기본 적재 거래소는 `XKRX`, `XNYS`다. `XNAS`는 옵션으로 적재할 수 있다.
 - 기본 적재 범위는 실행 연도 1월 1일 ~ 다음 연도 12월 31일이다.
 - 수동 실행도 가능하다.
 
 ```bash
-python -m src.jobs.run_monthly_market_calendar_pipeline --start-date 2026-01-01 --end-date 2027-12-31
+python -m src.jobs.run_monthly_market_calendar_pipeline --all-exchanges --start-date 2026-01-01 --end-date 2027-12-31
 ```
 
 ### 사용 방식
 - `src/utils/trading_calendar.py`가 공통 접근 레이어다.
 - `get_previous_trading_day`, `get_next_trading_day`, `get_latest_trading_day_on_or_before` 등으로 report/backtest에서 재사용한다.
 - `src/utils/market_data_quality.py`는 latest valid price date 후보를 고를 때 이 테이블 기준으로 비거래일을 우선 제외한다.
+- `XKRX`는 한국 주식/ETF/ETN/파생 데이터 수집 여부 판단에 사용한다.
+- `XNYS`는 미국 주식시장성 지표(S&P500, Nasdaq, SOX, VIX) 수집 여부 판단에 사용한다.
+- FRED/ECOS는 각자 공표 주기가 다르므로 `XNYS` 휴장일이어도 전체 macro 수집을 막지 않는다.
+- 휴장일 skip은 오류가 아니라 정상 종료이며 `SKIPPED_MARKET_CLOSED`로 로그를 남긴다.
 
 ### 한계
 - `pandas-market-calendars`와 내부 `exchange_calendars` 버전에 따라 임시공휴일, 특별휴장 반영 시차가 있을 수 있다.
+- 미국시장 특별휴장도 패키지 반영 시점에 따라 지연될 수 있다.
 - 테이블이 아직 생성되지 않았거나 비어 있으면 weekday fallback을 사용하며 warning을 남긴다.
+- 특별휴장 보정이 필요하면 별도 수동 override 정책이 필요하다.
 
 ## 4. 주요 품질 검증 규칙
 

@@ -28,18 +28,18 @@ class _FakeCalendar:
 
 
 def test_collector_returns_every_date(monkeypatch):
-    monkeypatch.setattr(collector_module, "resolve_krx_calendar_name", lambda: "XKRX")
+    monkeypatch.setattr(collector_module, "resolve_market_calendar_name", lambda _exchange: "XKRX")
     monkeypatch.setattr(collector_module.pmc, "get_calendar", lambda _name: _FakeCalendar())
-    rows = collector_module.fetch_krx_calendar(date(2026, 1, 1), date(2026, 1, 5))
+    rows = collector_module.fetch_market_calendar("XKRX", date(2026, 1, 1), date(2026, 1, 5))
     assert len(rows) == 5
     assert rows[0]["calendar_date"] == "2026-01-01"
     assert rows[-1]["calendar_date"] == "2026-01-05"
 
 
 def test_weekend_and_holiday_reason(monkeypatch):
-    monkeypatch.setattr(collector_module, "resolve_krx_calendar_name", lambda: "XKRX")
+    monkeypatch.setattr(collector_module, "resolve_market_calendar_name", lambda _exchange: "XKRX")
     monkeypatch.setattr(collector_module.pmc, "get_calendar", lambda _name: _FakeCalendar())
-    rows = collector_module.fetch_krx_calendar(date(2026, 1, 1), date(2026, 1, 4))
+    rows = collector_module.fetch_market_calendar("XKRX", date(2026, 1, 1), date(2026, 1, 4))
     mapped = {row["calendar_date"]: row for row in rows}
     assert mapped["2026-01-02"]["is_open"] is True
     assert mapped["2026-01-03"]["is_open"] is False
@@ -105,21 +105,22 @@ def test_weekday_fallback_warning(monkeypatch):
     messages = []
     monkeypatch.setattr(calendar_utils.logger, "warning", lambda message: messages.append(message))
     assert calendar_utils.is_trading_day(loader, date(2026, 1, 5)) is True
-    assert any("weekday fallback used" in message for message in messages)
+    assert any("CALENDAR_FALLBACK_USED" in message for message in messages)
 
 
 def test_dry_run_pipeline_skips_write(monkeypatch):
     loader = _Loader()
     monkeypatch.setattr(pipeline_module, "load_config", lambda: {"supabase": {"url": "x", "service_role_key": "y"}})
     monkeypatch.setattr(pipeline_module, "SupabaseLoader", lambda **_kwargs: loader)
+    monkeypatch.setattr(pipeline_module, "resolve_market_calendar_name", lambda exchange: exchange)
     monkeypatch.setattr(
         pipeline_module,
-        "fetch_krx_calendar",
-        lambda start_date, end_date: [
+        "fetch_market_calendar",
+        lambda exchange, _start_date, _end_date: [
             {
                 "calendar_date": "2026-01-01",
-                "exchange_code": "XKRX",
-                "market": "KRX",
+                "exchange_code": exchange,
+                "market": "KRX" if exchange == "XKRX" else "US",
                 "is_open": False,
                 "open_time": None,
                 "close_time": None,
@@ -133,8 +134,14 @@ def test_dry_run_pipeline_skips_write(monkeypatch):
             }
         ],
     )
-    summary = pipeline_module.run_pipeline(date(2026, 1, 1), date(2026, 1, 1), dry_run=True)
+    summary = pipeline_module.run_pipeline(
+        date(2026, 1, 1),
+        date(2026, 1, 1),
+        exchanges=["XKRX", "XNYS"],
+        dry_run=True,
+    )
     assert summary["dry_run"] is True
+    assert len(summary["exchanges"]) == 2
     assert loader.upserts == []
 
 
@@ -142,9 +149,10 @@ def test_pipeline_table_missing_raises(monkeypatch):
     loader = _Loader(fail=True)
     monkeypatch.setattr(pipeline_module, "load_config", lambda: {"supabase": {"url": "x", "service_role_key": "y"}})
     monkeypatch.setattr(pipeline_module, "SupabaseLoader", lambda **_kwargs: loader)
-    monkeypatch.setattr(pipeline_module, "fetch_krx_calendar", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(pipeline_module, "resolve_market_calendar_name", lambda exchange: exchange)
+    monkeypatch.setattr(pipeline_module, "fetch_market_calendar", lambda *_args, **_kwargs: [])
     try:
-        pipeline_module.run_pipeline(date(2026, 1, 1), date(2026, 1, 1), dry_run=False)
+        pipeline_module.run_pipeline(date(2026, 1, 1), date(2026, 1, 1), exchanges=["XKRX"], dry_run=False)
     except RuntimeError as exc:
         assert "sql/add_market_trading_calendar.sql" in str(exc)
     else:

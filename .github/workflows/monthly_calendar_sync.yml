@@ -4,6 +4,17 @@ on:
   schedule:
     - cron: '10 21 1 * *'
   workflow_dispatch:
+    inputs:
+      exchange:
+        description: 'Calendar exchange to refresh'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - XKRX
+          - XNYS
+          - XNAS
 
 jobs:
   monthly_market_calendar_sync:
@@ -20,9 +31,14 @@ jobs:
       - name: Run monthly market calendar pipeline
         env:
           API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
+          CALENDAR_EXCHANGE: ${{ github.event.inputs.exchange || 'all' }}
         run: |
           echo "schedule_scope=monthly_market_calendar_sync"
           mkdir -p config
           echo "$API_KEYS_JSON" > config/api_keys.json
           export PYTHONPATH=.
-          python -m src.jobs.run_monthly_market_calendar_pipeline
+          if [ "$CALENDAR_EXCHANGE" = "all" ]; then
+            python -m src.jobs.run_monthly_market_calendar_pipeline --all-exchanges
+          else
+            python -m src.jobs.run_monthly_market_calendar_pipeline --exchange "$CALENDAR_EXCHANGE"
+          fi

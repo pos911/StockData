@@ -577,71 +577,147 @@ def _print_market_calendar_quality(loader: SupabaseLoader, today: date):
             "calendar_date",
             count="exact",
         ).limit(1).execute()
-        current_year = loader.fetch_all(
-            "market_trading_calendar",
-            "calendar_date",
-            f"{today.year}-01-01",
-            f"{today.year}-12-31",
-        )
+        current_year = loader.fetch_all("market_trading_calendar", "calendar_date", f"{today.year}-01-01", f"{today.year}-12-31")
     except Exception as exc:
         print(f"table_exists=False note={exc}")
         print("status=WARN_MARKET_CALENDAR_MISSING")
         return
 
-    next_year = loader.fetch_all(
-        "market_trading_calendar",
-        "calendar_date",
-        f"{today.year + 1}-01-01",
-        f"{today.year + 1}-12-31",
+    next_year = loader.fetch_all("market_trading_calendar", "calendar_date", f"{today.year + 1}-01-01", f"{today.year + 1}-12-31")
+    recent_rows = loader.fetch_all("market_trading_calendar", "calendar_date", (today - timedelta(days=30)).isoformat(), today.isoformat())
+    upcoming_rows = loader.fetch_all("market_trading_calendar", "calendar_date", today.isoformat(), (today + timedelta(days=30)).isoformat())
+
+    def _exchange_rows(rows, exchange_code):
+        return [row for row in rows if row.get("exchange_code") == exchange_code]
+
+    def _range(rows):
+        if not rows:
+            return None, None
+        dates = sorted(str(row.get("calendar_date"))[:10] for row in rows if row.get("calendar_date"))
+        return (dates[0], dates[-1]) if dates else (None, None)
+
+    xkrx_current = _exchange_rows(current_year, "XKRX")
+    xkrx_next = _exchange_rows(next_year, "XKRX")
+    xnys_current = _exchange_rows(current_year, "XNYS")
+    xnys_next = _exchange_rows(next_year, "XNYS")
+    xkrx_today_rows = _exchange_rows(
+        loader.fetch_all("market_trading_calendar", "calendar_date", today.isoformat(), today.isoformat()),
+        "XKRX",
     )
-    recent_rows = loader.fetch_all(
-        "market_trading_calendar",
-        "calendar_date",
-        (today - timedelta(days=30)).isoformat(),
-        today.isoformat(),
+    xnys_today_rows = _exchange_rows(
+        loader.fetch_all("market_trading_calendar", "calendar_date", today.isoformat(), today.isoformat()),
+        "XNYS",
     )
-    upcoming_rows = loader.fetch_all(
-        "market_trading_calendar",
-        "calendar_date",
-        today.isoformat(),
-        (today + timedelta(days=30)).isoformat(),
-    )
-    today_rows = [
-        row for row in loader.fetch_all("market_trading_calendar", "calendar_date", today.isoformat(), today.isoformat())
-        if row.get("exchange_code") == "XKRX"
-    ]
-    weekday_holidays = sum(
-        1 for row in current_year
-        if row.get("exchange_code") == "XKRX"
-        and not row.get("is_open")
-        and row.get("reason") == "holiday"
-    )
-    previous_trading_day = get_previous_trading_day(loader, today, "XKRX")
-    next_trading_day = get_next_trading_day(loader, today, "XKRX")
-    recent_open_count = sum(1 for row in recent_rows if row.get("exchange_code") == "XKRX" and row.get("is_open"))
-    next_open_count = sum(1 for row in upcoming_rows if row.get("exchange_code") == "XKRX" and row.get("is_open"))
+    xkrx_weekday_holidays = sum(1 for row in xkrx_current if not row.get("is_open") and row.get("reason") == "holiday")
+    xnys_weekday_holidays = sum(1 for row in xnys_current if not row.get("is_open") and row.get("reason") == "holiday")
+    xkrx_previous = get_previous_trading_day(loader, today, "XKRX")
+    xkrx_next_day = get_next_trading_day(loader, today, "XKRX")
+    xnys_previous = get_previous_trading_day(loader, today, "XNYS")
+    xnys_next_day = get_next_trading_day(loader, today, "XNYS")
+    xkrx_recent_open_count = sum(1 for row in _exchange_rows(recent_rows, "XKRX") if row.get("is_open"))
+    xkrx_next_open_count = sum(1 for row in _exchange_rows(upcoming_rows, "XKRX") if row.get("is_open"))
+    xkrx_min, xkrx_max = _range(xkrx_current + xkrx_next)
+    xnys_min, xnys_max = _range(xnys_current + xnys_next)
 
     print("table_exists=True")
-    print(f"current_year_row_count={sum(1 for row in current_year if row.get('exchange_code') == 'XKRX')}")
-    print(f"next_year_row_count={sum(1 for row in next_year if row.get('exchange_code') == 'XKRX')}")
-    print(f"recent_30d_open_day_count={recent_open_count}")
-    print(f"next_30d_open_day_count={next_open_count}")
-    print(f"today_row_exists={bool(today_rows)}")
-    print(f"today_is_open={today_rows[0].get('is_open') if today_rows else None}")
-    print(f"previous_trading_day={previous_trading_day}")
-    print(f"next_trading_day={next_trading_day}")
-    print(f"weekday_holiday_count={weekday_holidays}")
+    print(f"XKRX calendar range={xkrx_min}..{xkrx_max}")
+    print(f"XKRX today is_open={xkrx_today_rows[0].get('is_open') if xkrx_today_rows else None}")
+    print(f"XKRX previous trading day={xkrx_previous}")
+    print(f"XKRX next trading day={xkrx_next_day}")
+    print(f"XNYS calendar range={xnys_min}..{xnys_max}")
+    print(f"XNYS today is_open={xnys_today_rows[0].get('is_open') if xnys_today_rows else None}")
+    print(f"XNYS previous trading day={xnys_previous}")
+    print(f"XNYS next trading day={xnys_next_day}")
+    print(f"current year XKRX rows={len(xkrx_current)}")
+    print(f"next year XKRX rows={len(xkrx_next)}")
+    print(f"current year XNYS rows={len(xnys_current)}")
+    print(f"next year XNYS rows={len(xnys_next)}")
+    print(f"recent_30d_open_day_count={xkrx_recent_open_count}")
+    print(f"next_30d_open_day_count={xkrx_next_open_count}")
+    print(f"XKRX weekday_holiday_count={xkrx_weekday_holidays}")
+    print(f"XNYS weekday_holiday_count={xnys_weekday_holidays}")
 
-    current_year_count = sum(1 for row in current_year if row.get("exchange_code") == "XKRX")
-    next_year_count = sum(1 for row in next_year if row.get("exchange_code") == "XKRX")
-    if current_year_count < 300:
+    if len(xkrx_current) < 300:
         print("status=WARN_MARKET_CALENDAR_INCOMPLETE")
-    elif next_year_count < 300:
+    elif len(xkrx_next) < 300:
         print("status=WARN_NEXT_YEAR_CALENDAR_INCOMPLETE")
-    elif not today_rows:
+    elif len(xnys_current) < 300:
+        print("status=WARN_MARKET_CALENDAR_MISSING_XNYS")
+    elif len(xnys_next) < 300:
+        print("status=WARN_NEXT_YEAR_CALENDAR_INCOMPLETE_XNYS")
+    elif not xkrx_today_rows:
         print("status=WARN_TODAY_CALENDAR_MISSING")
-    elif next_trading_day is None:
+    elif xkrx_next_day is None:
         print("status=WARN_NEXT_TRADING_DAY_MISSING")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_market_closed_ingestion_guardrail(loader: SupabaseLoader, today: date):
+    print("\n=== MARKET CLOSED INGESTION GUARDRAIL ===")
+    try:
+        calendar_rows = loader.fetch_all(
+            "market_trading_calendar",
+            "calendar_date",
+            (today - timedelta(days=30)).isoformat(),
+            today.isoformat(),
+        )
+    except Exception as exc:
+        print(f"status=WARN_MARKET_CALENDAR_MISSING note={exc}")
+        return
+
+    xkrx_closed_dates = [
+        str(row.get("calendar_date"))[:10]
+        for row in calendar_rows
+        if row.get("exchange_code") == "XKRX" and not row.get("is_open")
+    ]
+    xnys_closed_dates = [
+        str(row.get("calendar_date"))[:10]
+        for row in calendar_rows
+        if row.get("exchange_code") == "XNYS" and not row.get("is_open")
+    ]
+
+    krx_closed_row_count = 0
+    if xkrx_closed_dates:
+        ranking_rows = (
+            loader.client.table("normalized_market_rankings_daily")
+            .select("base_date")
+            .in_("base_date", xkrx_closed_dates)
+            .execute()
+            .data
+            or []
+        )
+        krx_closed_row_count = len(ranking_rows)
+
+    us_closed_suspicious_rows = 0
+    if xnys_closed_dates:
+        macro_rows = (
+            loader.client.table("normalized_global_macro_daily")
+            .select("base_date, sp500, nasdaq, sox, vix")
+            .in_("base_date", xnys_closed_dates)
+            .execute()
+            .data
+            or []
+        )
+        us_closed_suspicious_rows = sum(
+            1
+            for row in macro_rows
+            if any(row.get(field) is not None for field in ("sp500", "nasdaq", "sox", "vix"))
+        )
+
+    print(f"recent_xkrx_closed_dates_checked={len(xkrx_closed_dates)}")
+    print(f"recent_xnys_closed_dates_checked={len(xnys_closed_dates)}")
+    print(f"krx_closed_date_ranking_rows={krx_closed_row_count}")
+    print(f"us_closed_date_equity_indicator_rows={us_closed_suspicious_rows}")
+
+    if not any(row.get("exchange_code") == "XKRX" for row in calendar_rows):
+        print("status=WARN_MARKET_CALENDAR_MISSING_XKRX")
+    elif not any(row.get("exchange_code") == "XNYS" for row in calendar_rows):
+        print("status=WARN_MARKET_CALENDAR_MISSING_XNYS")
+    elif krx_closed_row_count > 0:
+        print("status=WARN_KRX_CLOSED_DATE_MARKET_ROWS")
+    elif us_closed_suspicious_rows > 0:
+        print("status=WARN_US_CLOSED_DATE_MARKET_ROWS")
     else:
         print("status=SUCCESS")
 
@@ -758,6 +834,7 @@ def verify_data():
     _print_ranking_source_quality(loader, today)
     _print_macro_quality(loader, today)
     _print_market_calendar_quality(loader, today)
+    _print_market_closed_ingestion_guardrail(loader, today)
     _print_stock_detail_universe_quality(config, loader)
     _macro_series_status(loader, today)
 

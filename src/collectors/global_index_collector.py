@@ -33,15 +33,20 @@ class GlobalIndexCollector:
             "bdry": "BDRY",
         }
 
-    def fetch_daily_indices(self, target_date: date) -> Optional[Dict[str, Any]]:
+    def fetch_daily_indices(self, target_date: date, skip_fields: set[str] | None = None) -> Optional[Dict[str, Any]]:
         try:
             import yfinance as yf
 
             start_dt = target_date - timedelta(days=7)
             end_dt = target_date + timedelta(days=1)
             result = {"base_date": target_date.strftime("%Y-%m-%d")}
+            skipped = skip_fields or set()
 
             for key, ticker in self.ticker_map.items():
+                if key in skipped:
+                    result[key] = None
+                    result[f"{key}_change_rate"] = None
+                    continue
                 data = yf.download(ticker, start=start_dt, end=end_dt, progress=False)
                 close = self._close_series(data)
                 if close is None or close.empty:
