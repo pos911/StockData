@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 import json
@@ -12,6 +12,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 from src.utils.market_data_quality import get_latest_valid_price_date
+from src.utils.trading_calendar import (
+    get_latest_trading_day_on_or_before,
+    get_next_trading_day,
+    get_previous_trading_day,
+)
 from src.utils.config_loader import load_config
 from src.utils.time_utils import get_current_kst
 from src.utils.symbols import is_q_prefixed_numeric_symbol, normalize_symbol_value
@@ -565,6 +570,82 @@ def _print_macro_quality(loader: SupabaseLoader, today: date):
         print("status=SUCCESS")
 
 
+def _print_market_calendar_quality(loader: SupabaseLoader, today: date):
+    print("\n=== MARKET CALENDAR QUALITY ===")
+    try:
+        loader.client.table("market_trading_calendar").select(
+            "calendar_date",
+            count="exact",
+        ).limit(1).execute()
+        current_year = loader.fetch_all(
+            "market_trading_calendar",
+            "calendar_date",
+            f"{today.year}-01-01",
+            f"{today.year}-12-31",
+        )
+    except Exception as exc:
+        print(f"table_exists=False note={exc}")
+        print("status=WARN_MARKET_CALENDAR_MISSING")
+        return
+
+    next_year = loader.fetch_all(
+        "market_trading_calendar",
+        "calendar_date",
+        f"{today.year + 1}-01-01",
+        f"{today.year + 1}-12-31",
+    )
+    recent_rows = loader.fetch_all(
+        "market_trading_calendar",
+        "calendar_date",
+        (today - timedelta(days=30)).isoformat(),
+        today.isoformat(),
+    )
+    upcoming_rows = loader.fetch_all(
+        "market_trading_calendar",
+        "calendar_date",
+        today.isoformat(),
+        (today + timedelta(days=30)).isoformat(),
+    )
+    today_rows = [
+        row for row in loader.fetch_all("market_trading_calendar", "calendar_date", today.isoformat(), today.isoformat())
+        if row.get("exchange_code") == "XKRX"
+    ]
+    weekday_holidays = sum(
+        1 for row in current_year
+        if row.get("exchange_code") == "XKRX"
+        and not row.get("is_open")
+        and row.get("reason") == "holiday"
+    )
+    previous_trading_day = get_previous_trading_day(loader, today, "XKRX")
+    next_trading_day = get_next_trading_day(loader, today, "XKRX")
+    recent_open_count = sum(1 for row in recent_rows if row.get("exchange_code") == "XKRX" and row.get("is_open"))
+    next_open_count = sum(1 for row in upcoming_rows if row.get("exchange_code") == "XKRX" and row.get("is_open"))
+
+    print("table_exists=True")
+    print(f"current_year_row_count={sum(1 for row in current_year if row.get('exchange_code') == 'XKRX')}")
+    print(f"next_year_row_count={sum(1 for row in next_year if row.get('exchange_code') == 'XKRX')}")
+    print(f"recent_30d_open_day_count={recent_open_count}")
+    print(f"next_30d_open_day_count={next_open_count}")
+    print(f"today_row_exists={bool(today_rows)}")
+    print(f"today_is_open={today_rows[0].get('is_open') if today_rows else None}")
+    print(f"previous_trading_day={previous_trading_day}")
+    print(f"next_trading_day={next_trading_day}")
+    print(f"weekday_holiday_count={weekday_holidays}")
+
+    current_year_count = sum(1 for row in current_year if row.get("exchange_code") == "XKRX")
+    next_year_count = sum(1 for row in next_year if row.get("exchange_code") == "XKRX")
+    if current_year_count < 300:
+        print("status=WARN_MARKET_CALENDAR_INCOMPLETE")
+    elif next_year_count < 300:
+        print("status=WARN_NEXT_YEAR_CALENDAR_INCOMPLETE")
+    elif not today_rows:
+        print("status=WARN_TODAY_CALENDAR_MISSING")
+    elif next_trading_day is None:
+        print("status=WARN_NEXT_TRADING_DAY_MISSING")
+    else:
+        print("status=SUCCESS")
+
+
 def _print_stock_detail_universe_quality(config: dict, loader: SupabaseLoader):
     print("\n=== STOCK DETAIL UNIVERSE QUALITY ===")
     static_count = 0
@@ -676,6 +757,7 @@ def verify_data():
     _print_market_master_quality(loader)
     _print_ranking_source_quality(loader, today)
     _print_macro_quality(loader, today)
+    _print_market_calendar_quality(loader, today)
     _print_stock_detail_universe_quality(config, loader)
     _macro_series_status(loader, today)
 

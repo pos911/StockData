@@ -347,7 +347,15 @@ class _PriceDateClient:
 
 class _PriceDateLoader:
     def __init__(self, table_map):
+        self.table_map = table_map
         self.client = _PriceDateClient(table_map)
+
+    def fetch_all(self, table_name, date_col, start_date, end_date, **_kwargs):
+        rows = list(self.table_map.get(table_name, []))
+        return [
+            row for row in rows
+            if start_date <= row.get(date_col, "") <= end_date
+        ]
 
 
 def test_latest_valid_price_date_prefers_latest_valid_not_simple_max():
@@ -360,10 +368,10 @@ def test_latest_valid_price_date_prefers_latest_valid_not_simple_max():
             "normalized_stock_prices_daily": [
                 {"symbol": "005930", "base_date": "2026-05-04", "close_price": None, "volume": None, "trading_value": None},
                 {"symbol": "000660", "base_date": "2026-05-04", "close_price": None, "volume": None, "trading_value": None},
-                {"symbol": "005930", "base_date": "2026-05-03", "close_price": 1, "volume": 10, "trading_value": 100},
-                {"symbol": "000660", "base_date": "2026-05-03", "close_price": 2, "volume": 20, "trading_value": 200},
+                {"symbol": "005930", "base_date": "2026-04-30", "close_price": 1, "volume": 10, "trading_value": 100},
+                {"symbol": "000660", "base_date": "2026-04-30", "close_price": 2, "volume": 20, "trading_value": 200},
             ],
         }
     )
     result = get_latest_valid_price_date(loader, __import__("datetime").date(2026, 5, 4), lookback_days=5, min_valid_rows=2)
-    assert result["selected_price_base_date"] == "2026-05-03"
+    assert result["selected_price_base_date"] == "2026-04-30"

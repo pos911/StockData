@@ -37,6 +37,23 @@ CREATE TABLE IF NOT EXISTS macro_series_master (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS market_trading_calendar (
+    calendar_date DATE NOT NULL,
+    exchange_code VARCHAR(20) NOT NULL,
+    market VARCHAR(30) NOT NULL,
+    is_open BOOLEAN NOT NULL,
+    open_time TIMESTAMP WITH TIME ZONE NULL,
+    close_time TIMESTAMP WITH TIME ZONE NULL,
+    timezone VARCHAR(50) NOT NULL DEFAULT 'Asia/Seoul',
+    holiday_name TEXT NULL,
+    reason TEXT NULL,
+    source VARCHAR(50) NOT NULL DEFAULT 'pandas_market_calendars',
+    calendar_version VARCHAR(50) NULL,
+    collected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (calendar_date, exchange_code)
+);
+
 -- 2. Raw 레이어 (가공 전 순수 수집 값)
 CREATE TABLE IF NOT EXISTS raw_stock_prices_daily (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

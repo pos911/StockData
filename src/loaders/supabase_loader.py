@@ -26,6 +26,7 @@ TABLE_CONFLICT_KEYS = {
     "normalized_global_macro_daily": ["base_date"],
     "market_breadth_daily": ["base_date"],
     "normalized_derivatives_daily": ["base_date"],
+    "market_trading_calendar": ["calendar_date", "exchange_code"],
     "feature_store_daily": ["symbol", "base_date", "feature_name"],
     "stocks_master": ["symbol"],
     "static_stock_universe": ["symbol"],

@@ -1,4 +1,4 @@
-# StockData 데이터 적재 명세서
+﻿# StockData 데이터 적재 명세서
 
 _Last updated: 2026-05-05_
 
@@ -584,6 +584,48 @@ us10y_us3y_spread_bp = (us10y - us3y) * 100
 | available_at / updated_at | 시각 |  |
 
 ---
+
+## 3.21 `market_trading_calendar`
+
+### 목적
+한국거래소 거래일/휴장일 캘린더를 일자 단위로 저장한다. 이 테이블은 latest valid price date 선택, ranking fallback, report 기준일 보정, backtest 거래일 계산에 공통으로 사용한다.
+
+### Primary Key
+- `(calendar_date, exchange_code)`
+
+| 컬럼 | 의미 | 예시 | 주의사항 |
+|---|---|---|---|
+| calendar_date | 거래소 로컬 기준 날짜 | 2026-05-04 | KST 기준 거래일 |
+| exchange_code | 거래소 캘린더 코드 | XKRX | pandas-market-calendars에서 선택된 calendar name |
+| market | 논리 시장명 | KRX | 현재 구현은 KRX 단일 |
+| is_open | 거래일 여부 | true / false | 거래일이면 true, 주말/휴장일이면 false |
+| open_time | 개장 시각 | 2026-05-04T09:00:00+09:00 | 거래일에만 값 존재 가능 |
+| close_time | 폐장 시각 | 2026-05-04T15:30:00+09:00 | 거래일에만 값 존재 가능 |
+| timezone | 시간대 | Asia/Seoul | 기본값 Asia/Seoul |
+| holiday_name | 휴장 명칭 | 어린이날 등 | 패키지가 명칭을 주지 않으면 null |
+| reason | 분류 사유 | trading_day, weekend, holiday, missing_schedule | report/backtest에서 휴장 구분에 사용 |
+| source | 캘린더 원천 | pandas_market_calendars | 현재 기본 구현 |
+| calendar_version | 수집 시 사용한 패키지 버전 | 5.3.2 | holiday 반영 범위 추적용 |
+| collected_at | 수집 시각 | timestamp | 파이프라인 실행 시각 |
+| updated_at | 갱신 시각 | timestamp | upsert 시 갱신 |
+
+### 갱신 정책
+- 월 1회 `monthly_market_calendar_sync.yml`에서 갱신한다.
+- 기본 적재 범위는 실행 연도 1월 1일 ~ 다음 연도 12월 31일이다.
+- 수동 실행도 가능하다.
+
+```bash
+python -m src.jobs.run_monthly_market_calendar_pipeline --start-date 2026-01-01 --end-date 2027-12-31
+```
+
+### 사용 방식
+- `src/utils/trading_calendar.py`가 공통 접근 레이어다.
+- `get_previous_trading_day`, `get_next_trading_day`, `get_latest_trading_day_on_or_before` 등으로 report/backtest에서 재사용한다.
+- `src/utils/market_data_quality.py`는 latest valid price date 후보를 고를 때 이 테이블 기준으로 비거래일을 우선 제외한다.
+
+### 한계
+- `pandas-market-calendars`와 내부 `exchange_calendars` 버전에 따라 임시공휴일, 특별휴장 반영 시차가 있을 수 있다.
+- 테이블이 아직 생성되지 않았거나 비어 있으면 weekday fallback을 사용하며 warning을 남긴다.
 
 ## 4. 주요 품질 검증 규칙
 

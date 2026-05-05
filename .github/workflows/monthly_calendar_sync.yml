@@ -1,0 +1,28 @@
+name: Monthly Market Calendar Sync
+
+on:
+  schedule:
+    - cron: '10 21 1 * *'
+  workflow_dispatch:
+
+jobs:
+  monthly_market_calendar_sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run monthly market calendar pipeline
+        env:
+          API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
+        run: |
+          echo "schedule_scope=monthly_market_calendar_sync"
+          mkdir -p config
+          echo "$API_KEYS_JSON" > config/api_keys.json
+          export PYTHONPATH=.
+          python -m src.jobs.run_monthly_market_calendar_pipeline
