@@ -35,7 +35,7 @@ def _has_meaningful_etp_prices(rows: list[dict]) -> bool:
 
 def _raw_price_record(row: dict, target_date: date) -> dict:
     return {
-        "source": "KRX",
+        "source": row.get("source", "KRX"),
         "symbol": row["symbol"],
         "base_date": row["base_date"],
         "raw_data": json.dumps(row, ensure_ascii=False),
@@ -364,6 +364,7 @@ def run_pipeline(target_date: date) -> None:
     logger.info(f"KOSDAQ count: {counter.get('KOSDAQ', 0)}")
     logger.info(f"ETF count: {counter.get('ETF', 0)}")
     logger.info(f"ETN count: {counter.get('ETN', 0)}")
+    logger.info("stock_price_source=KRX_WEB")
     logger.info(f"stock_price_data_date: {target_date:%Y-%m-%d}")
     logger.info(f"stock_daily_raw_rows: {stock_price_stats['stock_daily_raw_rows']}")
     logger.info(f"stock_daily_normalized_rows: {stock_price_stats['stock_daily_normalized_rows']}")

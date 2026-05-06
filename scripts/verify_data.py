@@ -593,7 +593,14 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
     print(f"q_prefix rows={q_prefix_rows}")
     print(f"stale ranking rows={0 if stale_days is None else stale_days}")
     print(f"selected valid price date={quality.get('selected_price_base_date')}")
-    if latest == today.isoformat() and kr_valid_rows < 100:
+    kr_rankings_present = any(
+        row.get("rank_type") in {"volume", "trading_value", "market_cap"}
+        and _standardize_market_value(row.get("market")) in {"KOSPI", "KOSDAQ"}
+        for row in ranking_rows
+    )
+    if latest == today.isoformat() and kr_valid_rows < 2000 and kr_rankings_present:
+        print("status=FAIL_STALE_KR_RANKING_PRESENT")
+    elif latest == today.isoformat() and kr_valid_rows < 2000:
         print("status=OK_SKIPPED_INSUFFICIENT_PRICE_DATA")
     elif volume_total["KOSDAQ"] == 0:
         print("status=FAIL_KOSDAQ_VOLUME_RANK")
@@ -771,6 +778,7 @@ def _print_price_coverage_by_market(loader: SupabaseLoader, today: date):
 
     latest_day_str = latest_xkrx_trading_day.isoformat()
     rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest_day_str, latest_day_str)
+    raw_rows = loader.fetch_all("raw_stock_prices_daily", "base_date", latest_day_str, latest_day_str)
     master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
     master_map = {
         normalize_symbol_value(row.get("symbol")): _standardize_market_value(row.get("market"))
@@ -801,11 +809,14 @@ def _print_price_coverage_by_market(loader: SupabaseLoader, today: date):
 
     kr_valid_rows = summary["KOSPI"]["valid"] + summary["KOSDAQ"]["valid"]
     print(f"KOSPI+KOSDAQ valid rows={kr_valid_rows}")
+    raw_source_counts = {}
+    for row in raw_rows:
+        source = row.get("source") or "UNKNOWN"
+        raw_source_counts[source] = raw_source_counts.get(source, 0) + 1
+    print(f"latest stock price source sample={raw_source_counts}")
     xkrx_is_open = is_market_open(loader, latest_xkrx_trading_day, "XKRX")
-    if xkrx_is_open and kr_valid_rows < 100:
+    if xkrx_is_open and kr_valid_rows < 2000:
         print("status=FAIL_INSUFFICIENT_STOCK_PRICE_ROWS")
-    elif xkrx_is_open and kr_valid_rows < 2000:
-        print("status=WARN_PARTIAL_STOCK_PRICE_COVERAGE")
     elif any(summary[market]["zero"] > 0 for market in summary):
         print("status=WARN_OPEN_MARKET_ZERO_VOLUME_ROWS")
     else:
