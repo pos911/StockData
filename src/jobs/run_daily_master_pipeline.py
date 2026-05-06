@@ -24,6 +24,8 @@ MASTER_MARKETS = {"KOSPI", "KOSDAQ", "ETF", "ETN"}
 ETP_LOOKBACK_DAYS = 10
 MIN_SUCCESS_STOCK_PRICE_ROWS = 2000
 MIN_WARN_STOCK_PRICE_ROWS = 100
+MIN_KOSPI_STOCK_PRICE_ROWS = 700
+MIN_KOSDAQ_STOCK_PRICE_ROWS = 1200
 
 
 def _has_meaningful_etp_prices(rows: list[dict]) -> bool:
@@ -192,6 +194,8 @@ def _collect_krx_stock_prices(
         "kospi_price_rows": 0,
         "kosdaq_price_rows": 0,
         "zero_volume_excluded_rows": 0,
+        "kospi_price_ready": 0,
+        "kosdaq_price_ready": 0,
     }
 
     for row in rows:
@@ -210,6 +214,8 @@ def _collect_krx_stock_prices(
                 counters["kosdaq_price_rows"] += 1
         else:
             counters["zero_volume_excluded_rows"] += 1
+    counters["kospi_price_ready"] = int(counters["kospi_price_rows"] >= MIN_KOSPI_STOCK_PRICE_ROWS)
+    counters["kosdaq_price_ready"] = int(counters["kosdaq_price_rows"] >= MIN_KOSDAQ_STOCK_PRICE_ROWS)
     return raw_price_rows, normalized_price_rows, counters
 
 
@@ -364,12 +370,16 @@ def run_pipeline(target_date: date) -> None:
     logger.info(f"KOSDAQ count: {counter.get('KOSDAQ', 0)}")
     logger.info(f"ETF count: {counter.get('ETF', 0)}")
     logger.info(f"ETN count: {counter.get('ETN', 0)}")
-    logger.info("stock_price_source=KRX_WEB")
+    logger.info("stock_price_source=KRX_API")
     logger.info(f"stock_price_data_date: {target_date:%Y-%m-%d}")
     logger.info(f"stock_daily_raw_rows: {stock_price_stats['stock_daily_raw_rows']}")
     logger.info(f"stock_daily_normalized_rows: {stock_price_stats['stock_daily_normalized_rows']}")
     logger.info(f"kospi_price_rows: {stock_price_stats['kospi_price_rows']}")
     logger.info(f"kosdaq_price_rows: {stock_price_stats['kosdaq_price_rows']}")
+    logger.info(
+        f"kospi_price_readiness={'KOSPI_PRICE_READY' if stock_price_stats['kospi_price_ready'] else 'FAIL_KOSPI_PRICE_COVERAGE'}"
+    )
+    logger.info("kosdaq_price_readiness=KOSDAQ_PRICE_NOT_IMPLEMENTED")
     logger.info(f"zero_volume_excluded_rows: {stock_price_stats['zero_volume_excluded_rows']}")
     logger.info(f"ETF price rows: raw={len(etf_raw_prices)} normalized={len(etf_normalized_prices)} data_date={etf_data_date}")
     logger.info(f"ETN price rows: raw={len(etn_raw_prices)} normalized={len(etn_normalized_prices)} data_date={etn_data_date}")

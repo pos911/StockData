@@ -11,6 +11,7 @@ import os
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.loaders.supabase_loader import SupabaseLoader
+from src.collectors.krx_collector import KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row
 from src.utils.trading_calendar import (
@@ -69,6 +70,8 @@ EXPECTED_RANKINGS = {
     ("ETF", "trading_value"),
 }
 DEFAULT_REPORT_REQUIRED_ETF_SYMBOLS = ("396500", "305720")
+KOSPI_PRICE_READY_THRESHOLD = 700
+KOSDAQ_PRICE_READY_THRESHOLD = 1200
 KRX_MARKET_TABLES = {
     "normalized_stock_prices_daily",
     "normalized_stock_supply_daily",
@@ -550,6 +553,7 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
     master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
     target_price_rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest, latest)
     kr_valid_rows = 0
+    kr_market_valid_rows = {"KOSPI": 0, "KOSDAQ": 0}
     for price_row in target_price_rows:
         master = master_map.get(normalize_symbol_value(price_row.get("symbol")))
         if not master:
@@ -557,6 +561,7 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
         if _standardize_market_value(master.get("market")) in {"KOSPI", "KOSDAQ"} and master.get("asset_type") == "STOCK":
             if is_valid_price_row(price_row, market_is_open=True):
                 kr_valid_rows += 1
+                kr_market_valid_rows[_standardize_market_value(master.get("market"))] += 1
     mismatch_rows = 0
     q_prefix_rows = 0
     volume_counts_by_source = {"KOSPI": {}, "KOSDAQ": {}, "ETF": {}, "ETN": {}}
@@ -593,14 +598,26 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
     print(f"q_prefix rows={q_prefix_rows}")
     print(f"stale ranking rows={0 if stale_days is None else stale_days}")
     print(f"selected valid price date={quality.get('selected_price_base_date')}")
-    kr_rankings_present = any(
-        row.get("rank_type") in {"volume", "trading_value", "market_cap"}
-        and _standardize_market_value(row.get("market")) in {"KOSPI", "KOSDAQ"}
-        for row in ranking_rows
-    )
-    if latest == today.isoformat() and kr_valid_rows < 2000 and kr_rankings_present:
+    kr_ranking_presence = {
+        market: any(
+            row.get("rank_type") in {"volume", "trading_value", "market_cap"}
+            and _standardize_market_value(row.get("market")) == market
+            for row in ranking_rows
+        )
+        for market in ("KOSPI", "KOSDAQ")
+    }
+    stale_market_rankings = []
+    if latest == today.isoformat():
+        if kr_ranking_presence["KOSPI"] and kr_market_valid_rows["KOSPI"] < KOSPI_PRICE_READY_THRESHOLD:
+            stale_market_rankings.append("KOSPI")
+        if KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED and kr_ranking_presence["KOSDAQ"] and kr_market_valid_rows["KOSDAQ"] < KOSDAQ_PRICE_READY_THRESHOLD:
+            stale_market_rankings.append("KOSDAQ")
+    if stale_market_rankings:
         print("status=FAIL_STALE_KR_RANKING_PRESENT")
-    elif latest == today.isoformat() and kr_valid_rows < 2000:
+    elif latest == today.isoformat() and (
+        kr_market_valid_rows["KOSPI"] < KOSPI_PRICE_READY_THRESHOLD
+        or (KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED and kr_market_valid_rows["KOSDAQ"] < KOSDAQ_PRICE_READY_THRESHOLD)
+    ):
         print("status=OK_SKIPPED_INSUFFICIENT_PRICE_DATA")
     elif volume_total["KOSDAQ"] == 0:
         print("status=FAIL_KOSDAQ_VOLUME_RANK")
@@ -809,13 +826,24 @@ def _print_price_coverage_by_market(loader: SupabaseLoader, today: date):
 
     kr_valid_rows = summary["KOSPI"]["valid"] + summary["KOSDAQ"]["valid"]
     print(f"KOSPI+KOSDAQ valid rows={kr_valid_rows}")
+    kospi_readiness = "KOSPI_PRICE_READY" if summary["KOSPI"]["valid"] >= KOSPI_PRICE_READY_THRESHOLD else "FAIL_KOSPI_PRICE_COVERAGE"
+    if not KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED:
+        kosdaq_readiness = "KOSDAQ_PRICE_NOT_IMPLEMENTED"
+    else:
+        kosdaq_readiness = "KOSDAQ_PRICE_READY" if summary["KOSDAQ"]["valid"] >= KOSDAQ_PRICE_READY_THRESHOLD else "FAIL_KOSDAQ_PRICE_COVERAGE"
+    etf_readiness = "ETF_PRICE_READY" if summary["ETF"]["valid"] > 0 else "WARN_ETF_PRICE_COVERAGE"
+    etn_readiness = "ETN_PRICE_READY" if summary["ETN"]["valid"] > 0 else "WARN_ETN_PRICE_COVERAGE"
+    print(f"KOSPI price readiness={kospi_readiness}")
+    print(f"KOSDAQ price readiness={kosdaq_readiness}")
+    print(f"ETF readiness={etf_readiness}")
+    print(f"ETN readiness={etn_readiness}")
     raw_source_counts = {}
     for row in raw_rows:
         source = row.get("source") or "UNKNOWN"
         raw_source_counts[source] = raw_source_counts.get(source, 0) + 1
     print(f"latest stock price source sample={raw_source_counts}")
     xkrx_is_open = is_market_open(loader, latest_xkrx_trading_day, "XKRX")
-    if xkrx_is_open and kr_valid_rows < 2000:
+    if xkrx_is_open and (summary["KOSPI"]["valid"] < KOSPI_PRICE_READY_THRESHOLD or (KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED and summary["KOSDAQ"]["valid"] < KOSDAQ_PRICE_READY_THRESHOLD)):
         print("status=FAIL_INSUFFICIENT_STOCK_PRICE_ROWS")
     elif any(summary[market]["zero"] > 0 for market in summary):
         print("status=WARN_OPEN_MARKET_ZERO_VOLUME_ROWS")
@@ -906,18 +934,32 @@ def _print_report_readiness(loader: SupabaseLoader, today: date):
         if row.get("symbol")
     }
     kr_valid_rows = 0
+    market_valid_rows = {"KOSPI": 0, "KOSDAQ": 0, "ETF": 0, "ETN": 0}
     for row in rows:
         master = master_map.get(normalize_symbol_value(row.get("symbol")))
         if not master:
             continue
         market, asset_type = master
-        if market in {"KOSPI", "KOSDAQ"} and asset_type == "STOCK" and is_valid_price_row(row, market_is_open=True):
-            kr_valid_rows += 1
+        if is_valid_price_row(row, market_is_open=True):
+            if market in market_valid_rows:
+                market_valid_rows[market] += 1
+            if market in {"KOSPI", "KOSDAQ"} and asset_type == "STOCK":
+                kr_valid_rows += 1
     print(f"latest_xkrx_trading_day={latest_day_str}")
     print(f"kr_stock_valid_price_rows={kr_valid_rows}")
-    if is_market_open(loader, latest_xkrx_trading_day, "XKRX") and kr_valid_rows < 100:
+    print(f"KOSPI Top trading_value/market_cap={'READY' if market_valid_rows['KOSPI'] >= KOSPI_PRICE_READY_THRESHOLD else 'NOT_READY'}")
+    print(
+        "KOSDAQ Top trading_value/market_cap="
+        f"{'READY' if KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED and market_valid_rows['KOSDAQ'] >= KOSDAQ_PRICE_READY_THRESHOLD else 'NOT_READY'}"
+    )
+    print("KIS volume ranking=READY")
+    print(f"ETF/ETN={'READY' if market_valid_rows['ETF'] > 0 or market_valid_rows['ETN'] > 0 else 'NOT_READY'}")
+    if is_market_open(loader, latest_xkrx_trading_day, "XKRX") and market_valid_rows["KOSPI"] < KOSPI_PRICE_READY_THRESHOLD:
         print("status=FAIL_KR_STOCK_PRICE_COVERAGE")
-        print("note=Do not use same-day KOSPI/KOSDAQ Top rankings for report generation.")
+        print("note=Do not use same-day KOSPI Top trading_value/market_cap rankings for report generation.")
+    elif is_market_open(loader, latest_xkrx_trading_day, "XKRX") and KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED and market_valid_rows["KOSDAQ"] < KOSDAQ_PRICE_READY_THRESHOLD:
+        print("status=FAIL_KR_STOCK_PRICE_COVERAGE")
+        print("note=Do not use same-day KOSDAQ Top trading_value/market_cap rankings for report generation.")
     else:
         print("status=SUCCESS")
 

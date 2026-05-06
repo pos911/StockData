@@ -1,12 +1,13 @@
 import asyncio
 import json
+from unittest.mock import Mock, patch
 
 import pytest
 
 from src.collectors.kis.base import KISBaseCollector
-from src.collectors.krx_collector import KRXCollector
+from src.collectors.krx_collector import KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED, KRXCollector
 from src.jobs.run_daily_master_pipeline import _collect_krx_stock_prices, _master_record
-from src.jobs.run_daily_ranking_pipeline import _count_valid_kr_stock_rows, _filter_kis_volume_rows, _persist_rankings
+from src.jobs.run_daily_ranking_pipeline import _count_valid_kr_stock_rows, _filter_kis_volume_rows, _is_kr_market_price_ready, _persist_rankings, _select_volume_rankings
 from src.jobs.run_daily_stock_pipeline import (
     _enforce_detail_universe_guardrail,
     _should_fetch_fundamentals,
@@ -82,6 +83,79 @@ def test_normalize_krx_stock_price_row():
     assert normalized["asset_type"] == "STOCK"
     assert normalized["close_price"] == 232500.0
     assert normalized["volume"] == 12345678.0
+    assert normalized["change_price"] is None
+
+
+def test_normalize_krx_stock_price_row_handles_dash_as_null_and_market_name():
+    collector = KRXCollector(auth_key="")
+    row = {
+        "BAS_DD": "20260506",
+        "ISU_SRT_CD": "005930",
+        "ISU_NM": "삼성전자",
+        "MKT_NM": "유가증권",
+        "TDD_OPNPRC": "-",
+        "TDD_HGPRC": "-",
+        "TDD_LWPRC": "-",
+        "TDD_CLSPRC": "232,500",
+        "ACC_TRDVOL": "0",
+        "ACC_TRDVAL": "-",
+        "CMPPREVDD_PRC": "-",
+        "FLUC_RT": "-",
+    }
+    normalized = collector.normalize_krx_stock_price_row(row, __import__("datetime").date(2026, 5, 6))
+    assert normalized["market"] == "KOSPI"
+    assert normalized["open_price"] is None
+    assert normalized["trading_value"] is None
+    assert normalized["change_price"] is None
+
+
+def test_fetch_kospi_stock_daily_trading_uses_post_json_payload():
+    collector = KRXCollector(auth_key="test")
+    sample_response = {
+        "OutBlock_1": [
+            {
+                "BAS_DD": "20260506",
+                "ISU_CD": "KR7005930003",
+                "ISU_NM": "삼성전자",
+                "MKT_NM": "KOSPI",
+                "TDD_CLSPRC": "232,500",
+                "ACC_TRDVOL": "12,345",
+                "ACC_TRDVAL": "123,456,789",
+            }
+        ]
+    }
+
+    def _fake_request(method, endpoint, json=None, data=None, headers=None, timeout=None, params=None):
+        response = Mock()
+        response.status_code = 200
+        response.headers = {"content-type": "application/json"}
+        response.text = '{"OutBlock_1":[{"BAS_DD":"20260506"}]}'
+        response.json.return_value = sample_response
+        response.raise_for_status.return_value = None
+        _fake_request.captured = {
+            "method": method,
+            "endpoint": endpoint,
+            "json": json,
+            "data": data,
+            "headers": headers,
+            "params": params,
+        }
+        return response
+
+    with patch("src.collectors.krx_collector.requests.request", side_effect=_fake_request):
+        rows = collector.fetch_kospi_stock_daily_trading(__import__("datetime").date(2026, 5, 6))
+
+    assert rows == sample_response["OutBlock_1"]
+    assert _fake_request.captured["method"] == "POST"
+    assert _fake_request.captured["json"] == {"basDd": "20260506"}
+    assert _fake_request.captured["headers"]["Content-Type"] == "application/json"
+
+
+def test_kosdaq_stock_daily_trading_is_not_implemented():
+    collector = KRXCollector(auth_key="test")
+    rows = collector.fetch_kosdaq_stock_daily_trading(__import__("datetime").date(2026, 5, 6))
+    assert rows == []
+    assert KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED is False
 
 
 def test_krx_stock_zero_volume_row_is_excluded_from_normalized_prices():
@@ -191,6 +265,27 @@ def test_persist_rankings_gracefully_omits_source_base_date_when_column_missing(
     assert "source_base_date" not in normalized[0]
     raw = next(records for table, records in loader.upserts if table == "raw_market_rankings")
     assert json.loads(raw[0]["raw_data"])["source_base_date"] == "2026-05-03"
+
+
+def test_market_specific_price_ready_thresholds():
+    assert _is_kr_market_price_ready("KOSPI", {"KOSPI": 700}) is True
+    assert _is_kr_market_price_ready("KOSPI", {"KOSPI": 699}) is False
+    assert _is_kr_market_price_ready("KOSDAQ", {"KOSDAQ": 1200}) is True
+    assert _is_kr_market_price_ready("KOSDAQ", {"KOSDAQ": 1199}) is False
+
+
+def test_kis_volume_ranking_is_allowed_without_price_fallback_when_market_not_ready():
+    master_map = {"005930": {"market": "KOSPI", "asset_type": "STOCK", "name": "Samsung"}}
+    source, rows = _select_volume_rankings(
+        loader=None,
+        target_date=__import__("datetime").date(2026, 5, 6),
+        market="KOSPI",
+        kis_rows=[{"symbol": "005930", "name": "Samsung", "volume": 100, "trading_value": 1000, "market_cap": None, "change_rate": None, "metric_value": 100, "raw_data": {}}],
+        master_map=master_map,
+        allow_price_fallback=False,
+    )
+    assert source == "KIS"
+    assert len(rows) == 1
 
 
 def test_master_record_has_no_rank_field():

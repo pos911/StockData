@@ -10,6 +10,7 @@ from src.utils.symbols import normalize_symbol_value
 from src.utils.time_utils import generate_available_at_for_eod
 
 logger = get_logger(__name__)
+KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED = False
 
 class KRXCollector:
     """한국거래소 데이터 수집기 (FinanceDataReader 및 KRX OPEN API 연동)"""
@@ -88,9 +89,10 @@ class KRXCollector:
         return self.fetch_krx_api("https://data-dbg.krx.co.kr/svc/apis/etp/etn_bydd_trd", target_date)
 
     def fetch_stock_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
-        rows = self.fetch_stock_daily_trading_from_krx_web(target_date)
-        if rows:
-            return rows
+        rows = self.fetch_kospi_stock_daily_trading(target_date)
+        kosdaq_rows = self.fetch_kosdaq_stock_daily_trading(target_date)
+        if rows or kosdaq_rows:
+            return rows + kosdaq_rows
         for endpoint in (
             "https://data.krx.co.kr/svc/apis/sto/stk_bydd_clpr",
             "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_clpr",
@@ -101,100 +103,91 @@ class KRXCollector:
                 return rows
         return self._fetch_stock_daily_trading_pykrx(target_date)
 
-    def fetch_stock_daily_trading_from_krx_web(self, target_date: date, market: str | None = None) -> List[Dict[str, Any]]:
-        endpoint = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-        preflight_url = "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd"
-        market_map = {
-            None: ["STK", "KSQ"],
-            "ALL": ["STK", "KSQ"],
-            "KOSPI": ["STK"],
-            "KOSDAQ": ["KSQ"],
-            "STK": ["STK"],
-            "KSQ": ["KSQ"],
-        }
-        market_ids = market_map.get((market or "").upper() if market else None, ["STK", "KSQ"])
+    def _request_krx_trading_api(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        method: str = "POST",
+        content_type: str = "application/json",
+    ) -> Dict[str, Any]:
+        if not self.auth_key:
+            logger.warning(f"KRX auth_key missing; skipping endpoint={endpoint}")
+            return {}
         headers = {
+            "AUTH_KEY": self.auth_key,
+            "Accept": "application/json",
+            "Content-Type": content_type,
             "User-Agent": self.headers["User-Agent"],
-            "Origin": "https://data.krx.co.kr",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         }
-        all_rows: List[Dict[str, Any]] = []
-        session = requests.Session()
-        try:
-            preflight = session.get(preflight_url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=20)
-            logger.info(
-                f"KRX_WEB preflight target_date={target_date:%Y-%m-%d} "
-                f"status={preflight.status_code} content_type={preflight.headers.get('content-type')}"
+        if content_type == "application/json":
+            response = requests.request(method, endpoint, json=payload, headers=headers, timeout=20)
+        elif method.upper() == "POST":
+            response = requests.request(method, endpoint, data=payload, headers=headers, timeout=20)
+        else:
+            response = requests.request(method, endpoint, params=payload, headers=headers, timeout=20)
+
+        content_type_header = response.headers.get("content-type", "")
+        body_sample = (response.text or "")[:500].replace("\n", " ").replace("\r", " ")
+        if response.status_code in {403, 404}:
+            logger.warning(
+                f"KRX trading API unavailable endpoint={endpoint} method={method} "
+                f"status={response.status_code} content_type={content_type_header} body_sample={body_sample}"
             )
+            return {}
+        if "LOGOUT" in body_sample or "로그인" in body_sample:
+            logger.warning(
+                f"KRX trading API requires authenticated session endpoint={endpoint} method={method} "
+                f"content_type={content_type_header} body_sample={body_sample}"
+            )
+            return {}
+        try:
+            response.raise_for_status()
+            return response.json()
         except Exception as exc:
-            logger.warning(f"KRX_WEB preflight failed: {exc}")
-        for market_id in market_ids:
-            params = {
-                "bld": "dbms/MDC/STAT/standard/MDCSTAT01501",
-                "trdDd": target_date.strftime("%Y%m%d"),
-                "share": "1",
-                "money": "1",
-                "csvxls_isNo": "false",
-                "mktId": market_id,
-            }
-            referers = [
-                "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd",
-                "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201020101",
-            ]
-            rows: List[Dict[str, Any]] = []
-            for method in ("POST", "GET"):
-                if rows:
-                    break
-                for referer in referers:
-                    try:
-                        request_headers = {**headers, "Referer": referer}
-                        if method == "POST":
-                            response = session.post(endpoint, data=params, headers=request_headers, timeout=20)
-                        else:
-                            response = session.get(endpoint, params=params, headers=request_headers, timeout=20)
-                        content_type = response.headers.get("content-type", "")
-                        body_sample = (response.text or "")[:500].replace("\n", " ").replace("\r", " ")
-                        if "LOGOUT" in body_sample or "로그인" in body_sample:
-                            logger.warning(
-                                f"KRX_WEB stock daily requires authenticated marketplace session market_id={market_id} "
-                                f"method={method} referer={referer} status={response.status_code} body_sample={body_sample}"
-                            )
-                            continue
-                        if response.status_code != 200:
-                            logger.warning(
-                                f"KRX_WEB stock daily request failed market_id={market_id} method={method} referer={referer} "
-                                f"status={response.status_code} content_type={content_type} body_sample={body_sample}"
-                            )
-                            continue
-                        try:
-                            payload = response.json()
-                        except Exception as exc:
-                            logger.warning(
-                                f"KRX_WEB stock daily JSON parse failed market_id={market_id} method={method} referer={referer} "
-                                f"content_type={content_type} body_sample={body_sample} error={exc}"
-                            )
-                            continue
-                        for key in ("OutBlock_1", "output", "output1", "block1"):
-                            candidate = payload.get(key)
-                            if isinstance(candidate, list):
-                                rows = candidate
-                                break
-                        sample_columns = sorted(rows[0].keys()) if rows else []
-                        logger.info(
-                            f"KRX_WEB stock daily fetched market_id={market_id} target_date={target_date:%Y-%m-%d} "
-                            f"method={method} referer={referer} row_count={len(rows)} columns={sample_columns} "
-                            f"sample_row={rows[0] if rows else None}"
-                        )
-                        if rows:
-                            break
-                    except Exception as exc:
-                        logger.warning(
-                            f"KRX_WEB stock daily request error market_id={market_id} method={method} referer={referer}: {exc}"
-                        )
-            all_rows.extend(rows)
-        return all_rows
+            logger.warning(
+                f"KRX trading API request failed endpoint={endpoint} method={method} "
+                f"content_type={content_type_header} body_sample={body_sample} error={exc}"
+            )
+            return {}
+
+    def fetch_kospi_stock_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
+        endpoint = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+        payload = {"basDd": target_date.strftime("%Y%m%d")}
+        attempts = [
+            ("POST", "application/json"),
+            ("POST", "application/x-www-form-urlencoded"),
+            ("GET", "application/json"),
+        ]
+        for method, content_type in attempts:
+            response_data = self._request_krx_trading_api(
+                endpoint=endpoint,
+                payload=payload,
+                method=method,
+                content_type=content_type,
+            )
+            rows = response_data.get("OutBlock_1") or []
+            if not isinstance(rows, list):
+                rows = []
+            sample_columns = sorted(rows[0].keys()) if rows else []
+            logger.info(
+                f"KRX KOSPI stock daily fetched target_date={target_date:%Y-%m-%d} "
+                f"method={method} content_type={content_type} row_count={len(rows)} columns={sample_columns}"
+            )
+            if rows:
+                if method != "POST" or content_type != "application/json":
+                    logger.warning(
+                        "KRX KOSPI daily trading succeeded with a request format different from the API sample. "
+                        f"Using method={method} content_type={content_type} until the documented JSON request path is validated."
+                    )
+                return rows
+        return []
+
+    def fetch_kosdaq_stock_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
+        logger.warning(
+            f"KOSDAQ stock daily trading endpoint is not implemented yet for target_date={target_date:%Y-%m-%d}. "
+            "Do not infer KOSDAQ full-market price coverage from the KOSPI endpoint."
+        )
+        return []
 
     def normalize_krx_stock_price_row(self, row: Dict[str, Any], target_date: date) -> Optional[Dict[str, Any]]:
         symbol = normalize_symbol_value(
@@ -205,7 +198,7 @@ class KRXCollector:
         )
         market_value = str(row.get("MKT_ID") or row.get("MKT_NM") or row.get("mktId") or row.get("mktNm") or "").strip().upper()
         market = None
-        if market_value in {"STK", "KOSPI"} or "KOSPI" in market_value:
+        if market_value in {"STK", "KOSPI"} or "KOSPI" in market_value or "유가증권" in str(row.get("MKT_NM") or ""):
             market = "KOSPI"
         elif market_value in {"KSQ", "KOSDAQ"} or "KOSDAQ" in market_value:
             market = "KOSDAQ"
@@ -226,8 +219,9 @@ class KRXCollector:
             "trading_value": self._parse_numeric(row.get("ACC_TRDVAL") or row.get("TDD_AMT") or row.get("acc_trdval") or row.get("tdd_amt")),
             "market_cap": self._parse_numeric(row.get("MKTCAP") or row.get("mktcap")),
             "outstanding_shares": self._parse_numeric(row.get("LIST_SHRS") or row.get("list_shrs")),
+            "change_price": self._parse_numeric(row.get("CMPPREVDD_PRC") or row.get("cmpprevdd_prc")),
             "change_rate": self._parse_numeric(row.get("FLUC_RT") or row.get("fluc_rt")),
-            "source": "KRX_WEB",
+            "source": "KRX_API",
             "available_at": generate_available_at_for_eod(target_date).isoformat(),
         }
 

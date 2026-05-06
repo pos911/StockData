@@ -40,7 +40,10 @@ RANKING_LIMITS = {
 }
 
 KR_STOCK_MARKETS = {"KOSPI", "KOSDAQ"}
-MIN_KR_STOCK_VALID_ROWS_FOR_RANKING = 100
+KR_STOCK_PRICE_READY_THRESHOLDS = {
+    "KOSPI": 700,
+    "KOSDAQ": 1200,
+}
 
 
 def _parse_numeric(value):
@@ -346,18 +349,33 @@ def _count_valid_kr_stock_rows(loader: SupabaseLoader, target_date: date, master
     return total, dict(market_counts)
 
 
+def _is_kr_market_price_ready(market: str, market_counts: dict[str, int]) -> bool:
+    if market not in KR_STOCK_MARKETS:
+        return True
+    return market_counts.get(market, 0) >= KR_STOCK_PRICE_READY_THRESHOLDS[market]
+
+
 def _select_volume_rankings(
     loader: SupabaseLoader,
     target_date: date,
     market: str,
     kis_rows: list[dict[str, Any]],
     master_map: dict[str, dict[str, Any]],
+    allow_price_fallback: bool = True,
 ) -> tuple[str, list[dict[str, Any]]]:
     threshold = VOLUME_THRESHOLDS[market]
     limit = RANKING_LIMITS[market]
     if len(kis_rows) >= threshold:
         return "KIS", kis_rows[:limit]
 
+    if not allow_price_fallback:
+        if kis_rows:
+            logger.warning(
+                f"{market} KIS volume ranking is sparse: count={len(kis_rows)}, threshold={threshold}, "
+                "but price fallback is disabled because market price coverage is not ready. Retaining sparse KIS rows."
+            )
+            return "KIS", kis_rows[:limit]
+        return "KIS", []
     logger.warning(
         f"{market} KIS volume ranking is sparse: count={len(kis_rows)}, threshold={threshold}. "
         "Replacing with valid price fallback."
@@ -411,17 +429,23 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
     kr_valid_rows, kr_market_counts = _count_valid_kr_stock_rows(loader, target_date, master_map)
     logger.info(
         f"target_date_valid_kr_stock_rows={kr_valid_rows} market_counts={kr_market_counts} "
-        f"minimum_required={MIN_KR_STOCK_VALID_ROWS_FOR_RANKING}"
+        f"market_thresholds={KR_STOCK_PRICE_READY_THRESHOLDS}"
     )
-    skip_kr_stock_rankings = kr_valid_rows < MIN_KR_STOCK_VALID_ROWS_FOR_RANKING
-    skip_message = ""
-    if skip_kr_stock_rankings:
-        skip_message = (
-            f"Insufficient KOSPI/KOSDAQ valid stock price rows on {target_date:%Y-%m-%d}; "
-            f"rows={kr_valid_rows}, market_counts={kr_market_counts}. "
-            "Skipping KOSPI/KOSDAQ ranking generation for target_date."
+    kr_market_ready = {
+        market: _is_kr_market_price_ready(market, kr_market_counts)
+        for market in KR_STOCK_MARKETS
+    }
+    skip_message_parts = []
+    for market in ("KOSPI", "KOSDAQ"):
+        if not kr_market_ready[market]:
+            skip_message_parts.append(
+                f"{market} valid_rows={kr_market_counts.get(market, 0)} threshold={KR_STOCK_PRICE_READY_THRESHOLDS[market]}"
+            )
+    skip_message = "; ".join(skip_message_parts)
+    if skip_message:
+        logger.warning(
+            f"Per-market KR stock price coverage is insufficient on {target_date:%Y-%m-%d}; {skip_message}"
         )
-        logger.warning(skip_message)
 
     auth_mgr = KISAuthManager(config)
     await auth_mgr.initialize()
@@ -434,22 +458,18 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
         ranking_total = 0
 
         for market in ("KOSPI", "KOSDAQ", "ETF", "ETN"):
-            if skip_kr_stock_rankings and market in KR_STOCK_MARKETS:
-                if not dry_run:
-                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "volume")
-                logger.warning(f"Skipping {market} volume ranking because target-date stock prices are insufficient.")
-                continue
             source, volume_rows = _select_volume_rankings(
                 loader=loader,
                 target_date=target_date,
                 market=market,
                 kis_rows=classified.get(market, []),
                 master_map=master_map,
+                allow_price_fallback=kr_market_ready.get(market, True),
             )
             source_base_date = target_date.strftime("%Y-%m-%d") if source == "KIS" else (
                 volume_rows[0]["raw_data"].get("source_base_date") if volume_rows else None
             )
-            if market in KR_STOCK_MARKETS and source_base_date != target_date.strftime("%Y-%m-%d"):
+            if market in KR_STOCK_MARKETS and source == "VALID_PRICE_FALLBACK" and source_base_date != target_date.strftime("%Y-%m-%d"):
                 if not dry_run:
                     _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "volume")
                 logger.warning(
@@ -474,10 +494,13 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
                 )
 
         for market, limit in RANKING_LIMITS.items():
-            if skip_kr_stock_rankings and market in KR_STOCK_MARKETS:
+            if market in KR_STOCK_MARKETS and not kr_market_ready[market]:
                 if not dry_run:
                     _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "trading_value")
-                logger.warning(f"Skipping {market} trading_value ranking because target-date stock prices are insufficient.")
+                logger.warning(
+                    f"Skipping {market} trading_value ranking because target-date stock prices are insufficient. "
+                    f"valid_rows={kr_market_counts.get(market, 0)} threshold={KR_STOCK_PRICE_READY_THRESHOLDS[market]}"
+                )
                 continue
             source, rows, price_base_date = _build_price_based_rankings(
                 loader, target_date, master_map, market, "trading_value", limit
@@ -503,10 +526,13 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
                 )
 
         for market, limit in RANKING_LIMITS.items():
-            if skip_kr_stock_rankings and market in KR_STOCK_MARKETS:
+            if market in KR_STOCK_MARKETS and not kr_market_ready[market]:
                 if not dry_run:
                     _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "market_cap")
-                logger.warning(f"Skipping {market} market_cap ranking because target-date stock prices are insufficient.")
+                logger.warning(
+                    f"Skipping {market} market_cap ranking because target-date stock prices are insufficient. "
+                    f"valid_rows={kr_market_counts.get(market, 0)} threshold={KR_STOCK_PRICE_READY_THRESHOLDS[market]}"
+                )
                 continue
             source, rows, price_base_date = _build_price_based_rankings(
                 loader, target_date, master_map, market, "market_cap", limit
@@ -535,7 +561,7 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
             loader.insert_log(
                 "daily_ranking_pipeline",
                 target_date.strftime("%Y-%m-%d"),
-                "SKIPPED_INSUFFICIENT_PRICE_DATA" if skip_kr_stock_rankings else "SUCCESS",
+                "SKIPPED_INSUFFICIENT_PRICE_DATA" if skip_message else "SUCCESS",
                 ranking_total,
                 skip_message,
             )

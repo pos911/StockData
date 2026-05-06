@@ -26,11 +26,13 @@ _Last updated: 2026-05-06_
 2. 관심종목은 `static_stock_universe.enabled=true` 기준이다.
 3. 시장별 랭킹의 공식 테이블은 `normalized_market_rankings_daily`다.
 4. 거래량 랭킹은 KIS `J` 전체시장 응답을 `stocks_master.market` 기준으로 분류하되, 부족하면 `VALID_PRICE_FALLBACK`으로 보강한다.
-5. 거래대금·시가총액 랭킹은 `normalized_stock_prices_daily + stocks_master` 기준으로 만든다.
-6. `Q530134` 같은 Q-prefix 심볼은 저장하지 않는다. 항상 canonical 6자리 심볼로 정규화한다.
-7. 최신 가격 기준일은 단순 `max(base_date)`가 아니라 `close_price`, `volume`, `trading_value`가 유효한 최신일을 사용한다.
-8. `available_at`은 데이터가 리포트·소비자에게 사용 가능해지는 시각이다.
-9. 신규 스키마 변경은 SQL 파일로 남기고 Supabase SQL Editor에서 수동 실행한다.
+5. KOSPI 전종목 일별가격은 KRX `stk_bydd_trd` 일별매매정보를 우선 사용한다.
+6. KOSDAQ 전종목 일별가격은 공식 endpoint 명세 확인 전까지 `NOT_IMPLEMENTED` 상태로 관리한다.
+7. 거래대금·시가총액 랭킹은 `normalized_stock_prices_daily + stocks_master` 기준으로 만든다.
+8. `Q530134` 같은 Q-prefix 심볼은 저장하지 않는다. 항상 canonical 6자리 심볼로 정규화한다.
+9. 최신 가격 기준일은 단순 `max(base_date)`가 아니라 `close_price`, `volume`, `trading_value`가 유효한 최신일을 사용한다.
+10. `available_at`은 데이터가 리포트·소비자에게 사용 가능해지는 시각이다.
+11. 신규 스키마 변경은 SQL 파일로 남기고 Supabase SQL Editor에서 수동 실행한다.
 
 ---
 
@@ -41,7 +43,8 @@ _Last updated: 2026-05-06_
 ```text
 1. run_daily_master_pipeline.py
    - KRX 기준 stocks_master 갱신
-   - KRX KOSPI/KOSDAQ 전종목 일별시세를 raw/normalized price에 적재
+   - KRX KOSPI 전종목 일별시세를 raw/normalized price에 적재
+   - KOSDAQ 전종목 일별시세는 공식 endpoint 명세 확인 전까지 미구현 상태로 유지 가능
    - ETF/ETN KRX ETP 일별매매정보를 raw/normalized price에 적재
 
 2. run_daily_ranking_pipeline.py
@@ -306,6 +309,8 @@ KIS 등에서 받는 종목 스냅샷성 지표 저장. 가격 테이블에 넣�
 - `market mismatch rows = 0`
 - `q_prefix rows = 0`
 - KOSPI/KOSDAQ volume count > 0
+- KOSPI trading_value/market_cap은 당일 유효 가격 row가 최소 700건일 때만 생성한다.
+- KOSDAQ trading_value/market_cap은 공식 전종목 가격 endpoint가 구현되고 당일 유효 가격 row가 최소 1200건일 때만 생성한다.
 - trading_value/market_cap ranking 존재
 - KOSPI/KOSDAQ은 target_date 기준 유효 가격 row가 충분할 때만 target_date ranking 생성
 - `VALID_PRICE_FALLBACK` row는 `source_base_date` 또는 raw_data `price_base_date`가 반드시 있어야 함
@@ -662,6 +667,8 @@ python -m src.jobs.run_monthly_market_calendar_pipeline --all-exchanges --start-
 close_price is not null
 and volume is not null
 and trading_value is not null
+and volume > 0
+and trading_value > 0
 and volume > 0
 and trading_value > 0
 ```
