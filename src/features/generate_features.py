@@ -10,6 +10,7 @@ from src.utils.logger import get_logger
 from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
+from src.utils.market_data_quality import is_valid_price_row
 from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
@@ -62,6 +63,15 @@ class FeatureGenerator:
 
         if prices_df.empty:
             logger.error("Required Price data is missing in Supabase.")
+            return 0
+        prices_df = prices_df[
+            prices_df.apply(
+                lambda row: is_valid_price_row(row.to_dict(), market_is_open=True),
+                axis=1,
+            )
+        ].copy()
+        if prices_df.empty:
+            logger.error("No valid price rows remain after filtering zero-volume or zero-trading-value rows.")
             return 0
 
         if supply_df.empty:

@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from datetime import date, timedelta
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.collectors.krx_collector import KRXCollector
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
 from src.utils.symbols import normalize_symbol_value
-from src.utils.time_utils import generate_available_at_for_eod, get_current_kst, parse_date_string
+from src.utils.time_utils import generate_available_at_for_eod, get_current_kst, get_current_utc, get_kst_target_date, parse_date_string
 from src.utils.trading_calendar import get_previous_trading_day, should_skip_market_job
 
 logger = get_logger(__name__)
@@ -236,10 +241,14 @@ def _deactivate_missing_master_rows(loader: SupabaseLoader, current_symbols: set
 
 
 def run_pipeline(target_date: date) -> None:
-    logger.info(f"Starting daily master pipeline for {target_date:%Y-%m-%d}")
+    logger.info(
+        f"Starting daily master pipeline for {target_date:%Y-%m-%d} "
+        f"(runner_date_utc={get_current_utc().date()}, target_date_kst={target_date})"
+    )
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     skip, reason = should_skip_market_job(loader, target_date, "XKRX", "daily_master_pipeline")
+    logger.info(f"xkrx_is_open={not skip} reason={reason}")
     if skip:
         previous_trading_day = get_previous_trading_day(loader, target_date, "XKRX")
         message = (
@@ -319,7 +328,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, help="YYYYMMDD format (default: today)")
     args = parser.parse_args()
-    target_dt = get_current_kst().date()
+    target_dt = get_kst_target_date(get_current_utc())
     if args.date:
         target_dt = parse_date_string(args.date)
     run_pipeline(target_dt)

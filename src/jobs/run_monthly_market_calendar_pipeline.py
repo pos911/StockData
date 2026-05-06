@@ -4,7 +4,11 @@ import argparse
 from collections import Counter
 from datetime import date
 
-from src.collectors.market_calendar_collector import fetch_market_calendar, resolve_market_calendar_name
+from src.collectors.market_calendar_collector import (
+    fetch_market_calendar,
+    load_market_calendar_overrides,
+    resolve_market_calendar_name,
+)
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
@@ -58,6 +62,7 @@ def _summarize_exchange(rows: list[dict], exchange_code: str, calendar_name: str
     counter = Counter(row["reason"] for row in rows)
     open_days = sum(1 for row in rows if row["is_open"])
     closed_days = len(rows) - open_days
+    override_dates = [row["calendar_date"] for row in rows if row.get("source") == "manual_override"]
     return {
         "exchange_code": exchange_code,
         "calendar_name": calendar_name,
@@ -68,6 +73,8 @@ def _summarize_exchange(rows: list[dict], exchange_code: str, calendar_name: str
         "weekday_holidays": counter.get("holiday", 0),
         "first_open_day": next((row["calendar_date"] for row in rows if row["is_open"]), None),
         "last_open_day": next((row["calendar_date"] for row in reversed(rows) if row["is_open"]), None),
+        "override_count": len(override_dates),
+        "override_dates": override_dates,
         "dry_run": dry_run,
     }
 
@@ -92,6 +99,7 @@ def run_pipeline(
     all_rows: list[dict] = []
     exchange_summaries: list[dict] = []
     failures: list[str] = []
+    overrides = load_market_calendar_overrides()
 
     for exchange_code in target_exchanges:
         try:
@@ -102,6 +110,11 @@ def run_pipeline(
             all_rows.extend(rows)
             for key, value in summary.items():
                 logger.info(f"{exchange_code}.{key}={value}")
+            if exchange_code == "XKRX":
+                logger.info(
+                    f"{exchange_code}.override_applied_2026_05_06="
+                    f"{'2026-05-06' in summary.get('override_dates', [])}"
+                )
         except Exception as exc:
             failures.append(f"{exchange_code}: {exc}")
             logger.error(f"Failed to build market calendar for {exchange_code}: {exc}")
@@ -111,6 +124,8 @@ def run_pipeline(
         "target_end_date": end_date.isoformat(),
         "exchanges": exchange_summaries,
         "total_rows": len(all_rows),
+        "override_count": sum(summary.get("override_count", 0) for summary in exchange_summaries),
+        "configured_override_keys": sorted(f"{exchange}:{calendar_date}" for exchange, calendar_date in overrides.keys()),
         "dry_run": dry_run,
     }
 

@@ -70,11 +70,43 @@ def _fetch_calendar_row(loader: SupabaseLoader, target_date: date, exchange_code
     return rows[0] if rows else None
 
 
-def is_trading_day(loader: SupabaseLoader, target_date: date, exchange_code: str = "XKRX") -> bool:
+def get_market_calendar_row(loader: SupabaseLoader, target_date: date, exchange_code: str = "XKRX") -> dict | None:
+    return _fetch_calendar_row(loader, target_date, exchange_code)
+
+
+def get_market_calendar_diagnostic(
+    loader: SupabaseLoader,
+    target_date: date,
+    exchange_code: str = "XKRX",
+) -> dict:
     row = _fetch_calendar_row(loader, target_date, exchange_code)
     if row is None:
-        return _weekday_is_open(target_date)
-    return bool(row.get("is_open"))
+        return {
+            "exchange_code": _exchange(exchange_code),
+            "calendar_date": target_date.isoformat(),
+            "is_open": _weekday_is_open(target_date),
+            "reason": "weekday_fallback_open" if _weekday_is_open(target_date) else "weekday_fallback_closed",
+            "source": None,
+            "holiday_name": None,
+            "open_time": None,
+            "close_time": None,
+            "calendar_fallback_used": True,
+        }
+    return {
+        "exchange_code": _exchange(exchange_code),
+        "calendar_date": str(row.get("calendar_date"))[:10],
+        "is_open": bool(row.get("is_open")),
+        "reason": row.get("reason"),
+        "source": row.get("source"),
+        "holiday_name": row.get("holiday_name"),
+        "open_time": row.get("open_time"),
+        "close_time": row.get("close_time"),
+        "calendar_fallback_used": False,
+    }
+
+
+def is_trading_day(loader: SupabaseLoader, target_date: date, exchange_code: str = "XKRX") -> bool:
+    return bool(get_market_calendar_diagnostic(loader, target_date, exchange_code).get("is_open"))
 
 
 def is_market_open(loader: SupabaseLoader, target_date: date, exchange_code: str) -> bool:
@@ -88,9 +120,9 @@ def should_skip_market_job(
     job_name: str,
 ) -> tuple[bool, str]:
     exchange = _exchange(exchange_code)
-    row = _fetch_calendar_row(loader, target_date, exchange)
-    if row is None:
-        if _weekday_is_open(target_date):
+    diagnostic = get_market_calendar_diagnostic(loader, target_date, exchange)
+    if diagnostic["calendar_fallback_used"]:
+        if diagnostic["is_open"]:
             return False, "MARKET_OPEN"
         fallback_market = EXCHANGE_FALLBACK_NAMES.get(exchange, exchange)
         logger.warning(
@@ -99,10 +131,18 @@ def should_skip_market_job(
         )
         return True, f"MARKET_CLOSED: {exchange} {target_date.isoformat()} weekday_fallback"
 
-    if row.get("is_open"):
-        return False, "MARKET_OPEN"
-    reason = row.get("reason") or "holiday"
-    return True, f"MARKET_CLOSED: {exchange} {target_date.isoformat()} {reason}"
+    if diagnostic["is_open"]:
+        return (
+            False,
+            f"MARKET_OPEN: {exchange} {target_date.isoformat()} "
+            f"{diagnostic.get('reason')} source={diagnostic.get('source')}",
+        )
+    reason = diagnostic.get("reason") or "holiday"
+    return (
+        True,
+        f"MARKET_CLOSED: {exchange} {target_date.isoformat()} "
+        f"{reason} source={diagnostic.get('source')}",
+    )
 
 
 def get_previous_trading_day(loader: SupabaseLoader, target_date: date, exchange_code: str = "XKRX") -> date | None:

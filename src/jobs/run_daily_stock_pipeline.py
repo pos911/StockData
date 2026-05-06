@@ -3,10 +3,16 @@ import json
 import argparse
 import re
 import os
+import sys
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.utils.logger import get_logger
-from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
+from src.utils.time_utils import get_current_kst, get_current_utc, get_kst_target_date, generate_available_at_for_eod
 from src.collectors.krx_collector import KRXCollector
 from src.collectors.kis.auth import KISAuthManager
 from src.collectors.kis.domestic import KISDomesticStockCollector
@@ -20,7 +26,7 @@ from src.normalizers.stock_normalizer import StockNormalizer
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 from src.utils.symbols import canonical_symbol_key, normalize_symbol_value
-from src.utils.trading_calendar import get_previous_trading_day, should_skip_market_job
+from src.utils.trading_calendar import get_latest_trading_day_on_or_before, get_previous_trading_day, should_skip_market_job
 
 logger = get_logger(__name__)
 
@@ -40,6 +46,19 @@ _NON_COMMON_NAME_PATTERNS = [
 _ETF_NAME_PREFIXES = ("KODEX", "TIGER", "RISE", "ACE", "SOL", "HANARO", "KOSEF", "TIMEFOLIO")
 _ETN_NAME_MARKERS = ("ETN",)
 _STANDARD_MARKETS = {"KOSPI", "KOSDAQ", "ETF", "ETN"}
+DEFAULT_REPORT_REQUIRED_ETF_SYMBOLS = ("396500", "305720")
+_NON_COMMON_NAME_MARKERS = (
+    "ETF",
+    "ETN",
+    "SPAC",
+    "REIT",
+    "PREFERRED",
+    "1우",
+    "2우",
+    "3우",
+    "우B",
+    "우C",
+)
 
 
 def _is_etf_like_name(name: str | None) -> bool:
@@ -111,7 +130,10 @@ def _infer_asset_type(name: str | None, market: str | None) -> str:
 def _should_fetch_fundamentals(name: str) -> bool:
     if not name:
         return True
-    return not any(re.search(pattern, name) for pattern in _NON_COMMON_NAME_PATTERNS)
+    if _infer_market_from_name(name) in {"ETF", "ETN"}:
+        return False
+    upper_name = str(name).upper()
+    return not any(marker.upper() in upper_name for marker in _NON_COMMON_NAME_MARKERS)
 
 
 def _to_ratio_record(record: dict) -> dict:
@@ -129,7 +151,13 @@ def _is_blank(value) -> bool:
 def _is_valid_price_row(row: dict | None) -> bool:
     if not row:
         return False
-    return not _is_blank(row.get("close_price")) and not _is_blank(row.get("volume")) and not _is_blank(row.get("trading_value"))
+    return (
+        not _is_blank(row.get("close_price"))
+        and not _is_blank(row.get("volume"))
+        and not _is_blank(row.get("trading_value"))
+        and float(row.get("volume") or 0) > 0
+        and float(row.get("trading_value") or 0) > 0
+    )
 
 
 def _is_snapshot_only_price_row(row: dict | None) -> bool:
@@ -189,7 +217,15 @@ async def _repair_missing_snapshot_fields(
     collector: KISDomesticStockCollector,
     target_date: date,
     available_at: str,
+    dry_run: bool = False,
 ):
+    if dry_run:
+        logger.info(
+            "Skipping snapshot field repair during dry-run "
+            f"for target_date={target_date.strftime('%Y-%m-%d')}"
+        )
+        return
+
     base_date_str = target_date.strftime("%Y-%m-%d")
 
     active_res = loader.client.table("stocks_master").select("symbol").eq("is_active", True).execute()
@@ -240,7 +276,8 @@ async def _repair_missing_snapshot_fields(
             logger.warning(f"[Repair] No fundamental snapshot returned for {symbol}")
             continue
 
-        loader.upsert_records("normalized_stock_snapshots_daily", [_to_snapshot_record(snapshot, available_at)])
+        if not dry_run:
+            loader.upsert_records("normalized_stock_snapshots_daily", [_to_snapshot_record(snapshot, available_at)])
 
         price_row = prices_by_symbol.get(symbol)
         if not _is_valid_price_row(price_row):
@@ -254,11 +291,12 @@ async def _repair_missing_snapshot_fields(
             )
         else:
             update_fields = _price_snapshot_update(snapshot, available_at)
-            loader.update_record(
-                "normalized_stock_prices_daily",
-                {"symbol": symbol, "base_date": base_date_str},
-                update_fields,
-            )
+            if not dry_run:
+                loader.update_record(
+                    "normalized_stock_prices_daily",
+                    {"symbol": symbol, "base_date": base_date_str},
+                    update_fields,
+                )
             repaired_prices += 1
 
         supply_payload = {
@@ -268,7 +306,8 @@ async def _repair_missing_snapshot_fields(
             "available_at": available_at,
         }
         if supply_payload["foreign_holding_ratio"] not in (None, 0):
-            loader.upsert_records("normalized_stock_supply_daily", [supply_payload])
+            if not dry_run:
+                loader.upsert_records("normalized_stock_supply_daily", [supply_payload])
             repaired_supply += 1
 
     logger.info(
@@ -397,6 +436,7 @@ async def _collect_full_universe_prices(
     target_date: date,
     available_at: str,
     limit: int | None = None,
+    dry_run: bool = False,
 ) -> int:
     if not universe:
         logger.error("Full universe is empty; skip full price ingestion.")
@@ -435,7 +475,8 @@ async def _collect_full_universe_prices(
                     fallback["base_date"] = target_date.strftime("%Y-%m-%d")
                     normalized = StockNormalizer.normalize_krx_daily(fallback, target_date)
                     normalized["available_at"] = available_at
-                    loader.upsert_records("normalized_stock_prices_daily", [normalized])
+                    if not dry_run:
+                        loader.upsert_records("normalized_stock_prices_daily", [normalized])
                     valid_records = [normalized] if _is_valid_price_row(normalized) else []
 
             if valid_records:
@@ -647,12 +688,203 @@ def _enforce_detail_universe_guardrail(
     return sorted(universe, key=_priority)[:max_universe_size]
 
 
-async def run_pipeline(target_date: date, limit: int = None):
-    logger.info(f"Starting Modernized Daily Stock Pipeline for {target_date}...")
+def _load_report_required_etf_symbols(loader: SupabaseLoader) -> list[str]:
+    symbols: set[str] = set()
+    try:
+        rows = (
+            loader.client.table("static_stock_universe")
+            .select("symbol, market")
+            .eq("enabled", True)
+            .execute()
+            .data
+            or []
+        )
+        for row in rows:
+            if _standardize_market(row.get("market")) == "ETF":
+                symbol = normalize_symbol_value(row.get("symbol"))
+                if symbol:
+                    symbols.add(symbol)
+    except Exception as exc:
+        logger.warning(f"Failed to load ETF coverage universe from static_stock_universe: {exc}")
+
+    if os.path.exists("config/stock_universe.json"):
+        try:
+            with open("config/stock_universe.json", "r", encoding="utf-8") as file:
+                items = json.load(file)
+            for item in items:
+                if item.get("enabled", True) and _standardize_market(item.get("market")) == "ETF":
+                    symbol = normalize_symbol_value(item.get("symbol"))
+                    if symbol:
+                        symbols.add(symbol)
+        except Exception as exc:
+            logger.warning(f"Failed to load ETF coverage universe from config/stock_universe.json: {exc}")
+
+    if not symbols:
+        symbols.update(DEFAULT_REPORT_REQUIRED_ETF_SYMBOLS)
+    return sorted(symbols)
+
+
+def _load_etf_collection_targets(loader: SupabaseLoader) -> list[str]:
+    symbols = set(_load_report_required_etf_symbols(loader))
+    try:
+        latest_rank_date_res = (
+            loader.client.table("normalized_market_rankings_daily")
+            .select("base_date")
+            .eq("market", "ETF")
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        latest_rank_date = (latest_rank_date_res.data or [{}])[0].get("base_date")
+        if latest_rank_date:
+            ranking_rows = (
+                loader.client.table("normalized_market_rankings_daily")
+                .select("symbol")
+                .eq("base_date", latest_rank_date)
+                .eq("market", "ETF")
+                .execute()
+                .data
+                or []
+            )
+            for row in ranking_rows:
+                symbol = normalize_symbol_value(row.get("symbol"))
+                if symbol:
+                    symbols.add(symbol)
+    except Exception as exc:
+        logger.warning(f"Failed to load ETF ranking coverage universe: {exc}")
+
+    return sorted(symbols)
+
+
+async def _ensure_required_etf_price_coverage(
+    loader: SupabaseLoader,
+    kis_collector: KISDomesticStockCollector,
+    krx_collector: KRXCollector,
+    target_date: date,
+    available_at: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    latest_trading_day = get_latest_trading_day_on_or_before(loader, target_date, "XKRX") or target_date
+    latest_trading_day_str = latest_trading_day.strftime("%Y-%m-%d")
+    required_symbols = _load_report_required_etf_symbols(loader)
+    collection_symbols = _load_etf_collection_targets(loader)
+    if not required_symbols:
+        return {
+            "latest_trading_day": latest_trading_day_str,
+            "required_count": 0,
+            "covered_count": 0,
+            "missing_symbols": [],
+            "stale_symbols": [],
+        }
+
+    existing_rows = (
+        loader.client.table("normalized_stock_prices_daily")
+        .select("symbol, base_date, close_price, volume, trading_value")
+        .eq("base_date", latest_trading_day_str)
+        .in_("symbol", collection_symbols)
+        .execute()
+        .data
+        or []
+    )
+    covered = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in existing_rows
+        if row.get("close_price") not in (None, "")
+        and row.get("volume") not in (None, "")
+        and row.get("trading_value") not in (None, "")
+    }
+
+    latest_rows_by_symbol = {}
+    try:
+        historical_rows = loader.fetch_all(
+            "normalized_stock_prices_daily",
+            "base_date",
+            (latest_trading_day - timedelta(days=10)).strftime("%Y-%m-%d"),
+            latest_trading_day_str,
+        )
+        for row in historical_rows:
+            symbol = normalize_symbol_value(row.get("symbol"))
+            if symbol not in collection_symbols:
+                continue
+            if row.get("close_price") in (None, "") or row.get("volume") in (None, "") or row.get("trading_value") in (None, ""):
+                continue
+            prev = latest_rows_by_symbol.get(symbol)
+            if not prev or str(row.get("base_date")) > str(prev.get("base_date")):
+                latest_rows_by_symbol[symbol] = row
+    except Exception as exc:
+        logger.warning(f"Failed to load ETF stale coverage rows: {exc}")
+
+    missing = [symbol for symbol in collection_symbols if symbol not in covered]
+    stale = [
+        symbol
+        for symbol in collection_symbols
+        if symbol in latest_rows_by_symbol and str(latest_rows_by_symbol[symbol].get("base_date")) != latest_trading_day_str
+    ]
+
+    recovered = 0
+    for symbol in list(missing):
+        raw_data = krx_collector.fetch_daily_ohlcv(symbol, latest_trading_day)
+        normalized = StockNormalizer.normalize_krx_daily(raw_data, generate_available_at_for_eod(latest_trading_day)) if raw_data else None
+        if normalized and _is_valid_price_row(normalized):
+            recovered += 1
+            if not dry_run:
+                loader.upsert_records(
+                    "raw_stock_prices_daily",
+                    [
+                        {
+                            "source": "KRX",
+                            "symbol": symbol,
+                            "base_date": normalized["base_date"],
+                            "raw_data": json.dumps(raw_data, ensure_ascii=False),
+                            "available_at": available_at,
+                        }
+                    ],
+                )
+                loader.upsert_records("normalized_stock_prices_daily", [normalized])
+            covered.add(symbol)
+            continue
+
+        kis_rows = await kis_collector.fetch_ohlcv(
+            symbol,
+            timeframe="D",
+            start_date=latest_trading_day.strftime("%Y%m%d"),
+            end_date=latest_trading_day.strftime("%Y%m%d"),
+            available_at=available_at,
+        )
+        valid_kis_row = next((row for row in kis_rows if _is_valid_price_row(row)), None)
+        if valid_kis_row:
+            recovered += 1
+            if not dry_run:
+                loader.upsert_records("normalized_stock_prices_daily", [valid_kis_row])
+            covered.add(symbol)
+
+    missing = [symbol for symbol in collection_symbols if symbol not in covered]
+    logger.info(
+        "ETF required coverage check: "
+        f"latest_trading_day={latest_trading_day_str}, report_required_count={len(required_symbols)}, "
+        f"collection_target_count={len(collection_symbols)}, "
+        f"covered_count={len(covered)}, recovered_count={recovered}, "
+        f"missing_symbols={missing[:10]}, stale_symbols={stale[:10]}"
+    )
+    return {
+        "latest_trading_day": latest_trading_day_str,
+        "required_count": len(required_symbols),
+        "covered_count": len(covered),
+        "missing_symbols": missing,
+        "stale_symbols": stale,
+    }
+
+
+async def run_pipeline(target_date: date, limit: int = None, dry_run: bool = False):
+    logger.info(
+        f"Starting Modernized Daily Stock Pipeline for {target_date} "
+        f"(runner_date_utc={get_current_utc().date()}, target_date_kst={target_date}, dry_run={dry_run})..."
+    )
 
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     skip, reason = should_skip_market_job(loader, target_date, "XKRX", "daily_stock_pipeline")
+    logger.info(f"xkrx_is_open={not skip} reason={reason}")
     if skip:
         previous_trading_day = get_previous_trading_day(loader, target_date, "XKRX")
         message = (
@@ -660,20 +892,21 @@ async def run_pipeline(target_date: date, limit: int = None):
             f"previous_trading_day={previous_trading_day} reason={reason}"
         )
         logger.warning(message)
-        loader.insert_log(
-            "daily_stock_pipeline",
-            target_date.strftime("%Y-%m-%d"),
-            "SKIPPED_MARKET_CLOSED",
-            0,
-            message,
-        )
-        loader.insert_log(
-            "daily_stock_full_price_pipeline",
-            target_date.strftime("%Y-%m-%d"),
-            "SKIPPED_MARKET_CLOSED",
-            0,
-            message,
-        )
+        if not dry_run:
+            loader.insert_log(
+                "daily_stock_pipeline",
+                target_date.strftime("%Y-%m-%d"),
+                "SKIPPED_MARKET_CLOSED",
+                0,
+                message,
+            )
+            loader.insert_log(
+                "daily_stock_full_price_pipeline",
+                target_date.strftime("%Y-%m-%d"),
+                "SKIPPED_MARKET_CLOSED",
+                0,
+                message,
+            )
         return
 
     auth_mgr = KISAuthManager(config)
@@ -682,6 +915,9 @@ async def run_pipeline(target_date: date, limit: int = None):
     semaphore = asyncio.Semaphore(2)
     kis_collector = KISDomesticStockCollector(config, auth_mgr, semaphore)
     fundamentals_collector = KISFundamentalsCollector(config, auth_mgr, semaphore)
+    if dry_run:
+        kis_collector.write_enabled = False
+        fundamentals_collector.write_enabled = False
 
     universe_loader = DynamicUniverseLoader(config, kis_collector)
     krx_collector = KRXCollector(auth_key=config.get("krx", {}).get("auth_key", ""))
@@ -704,7 +940,17 @@ async def run_pipeline(target_date: date, limit: int = None):
             target_date=target_date,
             available_at=available_at.isoformat(),
             limit=limit,
+            dry_run=dry_run,
         )
+
+    etf_coverage = await _ensure_required_etf_price_coverage(
+        loader=loader,
+        kis_collector=kis_collector,
+        krx_collector=krx_collector,
+        target_date=target_date,
+        available_at=available_at.isoformat(),
+        dry_run=dry_run,
+    )
 
     universe = await universe_loader.get_combined_universe(auto_backfill=limit is None)
     active_master_count = _count_active_master_symbols(loader)
@@ -735,6 +981,9 @@ async def run_pipeline(target_date: date, limit: int = None):
         "api_errors": 0,
         "db_errors": 0,
     }
+    quality["report_required_etf_count"] = etf_coverage["required_count"]
+    quality["report_required_etf_covered"] = etf_coverage["covered_count"]
+    quality["report_required_etf_missing"] = len(etf_coverage["missing_symbols"])
 
     canonical_map = {}
     for stock in universe:
@@ -789,6 +1038,8 @@ async def run_pipeline(target_date: date, limit: int = None):
     flush_size = 200
 
     def flush_buf(buf: list, table: str):
+        if dry_run:
+            return
         if len(buf) >= flush_size:
             loader.upsert_records(table, buf[:])
             buf.clear()
@@ -872,7 +1123,8 @@ async def run_pipeline(target_date: date, limit: int = None):
                     )
                 )
                 seen_master.add(symbol)
-                flush_buf(master_buf, "stocks_master")
+                if not dry_run:
+                    flush_buf(master_buf, "stocks_master")
 
             if kis_ohlcv:
                 quality["price_success"] += 1
@@ -900,13 +1152,15 @@ async def run_pipeline(target_date: date, limit: int = None):
                 available_at=available_at.isoformat(),
             )
             if snapshot_info:
-                loader.upsert_records(
-                    "normalized_stock_snapshots_daily",
-                    [_to_snapshot_record(snapshot_info, available_at.isoformat())],
-                )
+                if not dry_run:
+                    loader.upsert_records(
+                        "normalized_stock_snapshots_daily",
+                        [_to_snapshot_record(snapshot_info, available_at.isoformat())],
+                    )
                 enriched_price = _merge_latest_price_record(kis_ohlcv, snapshot_info)
                 if enriched_price:
-                    loader.upsert_records("normalized_stock_prices_daily", [enriched_price])
+                    if not dry_run:
+                        loader.upsert_records("normalized_stock_prices_daily", [enriched_price])
                 else:
                     try:
                         existing_price = (
@@ -918,7 +1172,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                             .execute()
                         )
                         existing_row = (existing_price.data or [None])[0]
-                        if _is_valid_price_row(existing_row):
+                        if _is_valid_price_row(existing_row) and not dry_run:
                             loader.update_record(
                                 "normalized_stock_prices_daily",
                                 {"symbol": symbol, "base_date": base_date_str},
@@ -928,7 +1182,7 @@ async def run_pipeline(target_date: date, limit: int = None):
                         logger.warning(f"Snapshot price-field update skipped for {symbol}: {update_exc}")
 
                 enriched_supply = _merge_latest_supply_record(supply_records, snapshot_info)
-                if enriched_supply:
+                if enriched_supply and not dry_run:
                     loader.upsert_records("normalized_stock_supply_daily", [enriched_supply])
 
             if _should_fetch_fundamentals(name):
@@ -965,7 +1219,8 @@ async def run_pipeline(target_date: date, limit: int = None):
                         }
                         for item in disclosures
                     ]
-                    loader.upsert_records("raw_disclosures", disclosure_records)
+                    if not dry_run:
+                        loader.upsert_records("raw_disclosures", disclosure_records)
 
                     events = opendart_collector.parse_events(symbol, target_date.strftime("%Y-%m-%d"), disclosures)
                     if events:
@@ -980,10 +1235,10 @@ async def run_pipeline(target_date: date, limit: int = None):
                             }
                             for event in events
                         ]
-                        if event_records:
+                        if event_records and not dry_run:
                             loader.upsert_records("normalized_stock_events_daily", event_records)
 
-            if naver_collector is not None:
+            if naver_collector is not None and not dry_run:
                 news_data = naver_collector.fetch_news(
                     f"{name} {symbol}",
                     freshness_hours=12,
@@ -1000,7 +1255,8 @@ async def run_pipeline(target_date: date, limit: int = None):
                 raw_data = krx_collector.fetch_daily_ohlcv(symbol, target_date)
                 if raw_data:
                     norm_data = StockNormalizer.normalize_krx_daily(raw_data, available_at)
-                    loader.upsert_records("normalized_stock_prices_daily", [norm_data])
+                    if not dry_run:
+                        loader.upsert_records("normalized_stock_prices_daily", [norm_data])
 
             total_processed += 1
         except Exception as exc:
@@ -1011,13 +1267,13 @@ async def run_pipeline(target_date: date, limit: int = None):
     logger.info(
         f"Final flush: price={len(price_buf)}, supply={len(supply_buf)}, ratio={len(ratio_buf)}, master={len(master_buf)}"
     )
-    if price_buf:
+    if price_buf and not dry_run:
         loader.upsert_records("normalized_stock_prices_daily", price_buf)
-    if supply_buf:
+    if supply_buf and not dry_run:
         loader.upsert_records("normalized_stock_supply_daily", supply_buf)
-    if ratio_buf:
+    if ratio_buf and not dry_run:
         loader.upsert_records("normalized_stock_fundamentals_ratios", ratio_buf)
-    if master_buf:
+    if master_buf and not dry_run:
         loader.upsert_records("stocks_master", master_buf)
 
     await _repair_missing_snapshot_fields(
@@ -1025,6 +1281,7 @@ async def run_pipeline(target_date: date, limit: int = None):
         collector=kis_collector,
         target_date=target_date,
         available_at=available_at.isoformat(),
+        dry_run=dry_run,
     )
 
     today_str = target_date.strftime("%Y-%m-%d")
@@ -1088,25 +1345,26 @@ async def run_pipeline(target_date: date, limit: int = None):
     if issues:
         logger.warning("quality_issues: " + "; ".join(issues))
 
-    loader.insert_log(
-        "daily_stock_pipeline",
-        target_date.strftime("%Y-%m-%d"),
-        status,
-        total_processed,
-        "; ".join(issues),
-    )
-    loader.insert_log(
-        "daily_stock_full_price_pipeline",
-        target_date.strftime("%Y-%m-%d"),
-        "SUCCESS" if full_price_processed > 0 or _should_skip_full_universe_price_ingestion(latest_valid_price_count) else "WARN",
-        full_price_processed,
-        "" if full_price_processed > 0 else (
-            f"skipped_full_universe_prices latest_valid_price_date={latest_valid_price_date} "
-            f"valid_stock_rows={latest_valid_price_count}"
-            if _should_skip_full_universe_price_ingestion(latest_valid_price_count)
-            else ""
-        ),
-    )
+    if not dry_run:
+        loader.insert_log(
+            "daily_stock_pipeline",
+            target_date.strftime("%Y-%m-%d"),
+            status,
+            total_processed,
+            "; ".join(issues),
+        )
+        loader.insert_log(
+            "daily_stock_full_price_pipeline",
+            target_date.strftime("%Y-%m-%d"),
+            "SUCCESS" if full_price_processed > 0 or _should_skip_full_universe_price_ingestion(latest_valid_price_count) else "WARN",
+            full_price_processed,
+            "" if full_price_processed > 0 else (
+                f"skipped_full_universe_prices latest_valid_price_date={latest_valid_price_date} "
+                f"valid_stock_rows={latest_valid_price_count}"
+                if _should_skip_full_universe_price_ingestion(latest_valid_price_count)
+                else ""
+            ),
+        )
     logger.info("Pipeline Finished Successfully.")
 
 
@@ -1114,12 +1372,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, help="YYYYMMDD format (default: today)")
     parser.add_argument("--limit", type=int, help="Limit number of symbols to process")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    target_dt = get_current_kst().date()
+    target_dt = get_kst_target_date(get_current_utc())
     if args.date:
         from src.utils.time_utils import parse_date_string
 
         target_dt = parse_date_string(args.date)
 
-    asyncio.run(run_pipeline(target_dt, limit=args.limit))
+    asyncio.run(run_pipeline(target_dt, limit=args.limit, dry_run=args.dry_run))

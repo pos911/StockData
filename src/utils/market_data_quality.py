@@ -42,11 +42,13 @@ def _fetch_rows(
     return result.data or []
 
 
-def _is_valid_price_row(row: dict[str, Any]) -> bool:
+def is_valid_price_row(row: dict[str, Any], market_is_open: bool | None = None) -> bool:
     return (
         row.get("close_price") not in (None, "")
         and row.get("volume") not in (None, "")
         and row.get("trading_value") not in (None, "")
+        and float(row.get("volume") or 0) > 0
+        and float(row.get("trading_value") or 0) > 0
     )
 
 
@@ -111,7 +113,7 @@ def get_latest_valid_price_date(
 
     for candidate_date in candidate_dates:
         rows = _fetch_rows(loader, "normalized_stock_prices_daily", "base_date", candidate_date, candidate_date)
-        valid_rows = [row for row in rows if _is_valid_price_row(row)]
+        valid_rows = [row for row in rows if is_valid_price_row(row, market_is_open=True)]
         market_counter = Counter()
         for row in valid_rows:
             market, _asset_type = master_map.get(normalize_symbol_value(row.get("symbol")), (None, None))

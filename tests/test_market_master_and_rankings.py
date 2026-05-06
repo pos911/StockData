@@ -2,11 +2,13 @@ import asyncio
 
 import pytest
 
+from src.collectors.kis.base import KISBaseCollector
 from src.collectors.krx_collector import KRXCollector
 from src.jobs.run_daily_master_pipeline import _master_record
 from src.jobs.run_daily_ranking_pipeline import _filter_kis_volume_rows, _persist_rankings
 from src.jobs.run_daily_stock_pipeline import (
     _enforce_detail_universe_guardrail,
+    _should_fetch_fundamentals,
     _should_skip_full_universe_price_ingestion,
 )
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
@@ -285,6 +287,20 @@ def test_detail_universe_guardrail_keeps_limit_override():
 def test_full_universe_price_ingestion_guardrail_skip():
     assert _should_skip_full_universe_price_ingestion(2000) is True
     assert _should_skip_full_universe_price_ingestion(1999) is False
+
+
+def test_should_fetch_fundamentals_uses_safe_substring_matching():
+    assert _should_fetch_fundamentals("KODEX 200") is False
+    assert _should_fetch_fundamentals("삼성전자우B") is False
+    assert _should_fetch_fundamentals("삼성전자") is True
+
+
+@pytest.mark.asyncio
+async def test_kis_base_collector_write_disabled_skips_db_write():
+    collector = object.__new__(KISBaseCollector)
+    collector.write_enabled = False
+    result = await collector.upsert_records("normalized_stock_prices_daily", [{"symbol": "005930"}])
+    assert result is True
 
 
 class _PriceDateResult:

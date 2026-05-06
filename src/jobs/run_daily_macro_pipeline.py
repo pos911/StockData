@@ -1,13 +1,18 @@
 import json
 import argparse
+import sys
 from datetime import date, timedelta
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 import yfinance as yf
 
 from src.utils.logger import get_logger
 from src.utils.market_data_quality import get_latest_valid_price_date
-from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
+from src.utils.time_utils import get_current_kst, get_current_utc, get_kst_target_date, generate_available_at_for_eod
 from src.collectors.fred_collector import FREDCollector
 from src.normalizers.macro_normalizer import MacroNormalizer
 from src.loaders.supabase_loader import SupabaseLoader
@@ -149,6 +154,24 @@ def fetch_latest_series_value_or_fred(
     return None
 
 
+def _build_fred_warning(
+    loader: SupabaseLoader,
+    fred: FREDCollector,
+    series_id: str,
+    target_date: date,
+    error_type: str,
+    report_impact: str,
+) -> dict:
+    latest = fetch_latest_normalized_macro_value(loader, series_id, target_date)
+    return {
+        "series_id": series_id,
+        "error_type": error_type,
+        "retry_count": getattr(getattr(fred, "client", None), "max_retries", None),
+        "fallback_latest_date": latest.get("base_date") if latest else None,
+        "report_impact": report_impact,
+    }
+
+
 def _apply_us_equity_market_guardrail(
     loader: SupabaseLoader,
     global_index,
@@ -195,7 +218,10 @@ def _apply_us_equity_market_guardrail(
 
 
 def run_pipeline(target_date: date, dry_run: bool = False):
-    logger.info(f"Starting Daily Macro Pipeline up to {target_date}...")
+    logger.info(
+        f"Starting Daily Macro Pipeline up to {target_date} "
+        f"(runner_date_utc={get_current_utc().date()}, target_date_kst={target_date})..."
+    )
 
     config = load_config()
     series_list = load_macro_series()
@@ -227,6 +253,7 @@ def run_pipeline(target_date: date, dry_run: bool = False):
     timestamp_now = get_current_kst()
     total_processed = 0
     encountered_error = False
+    fred_warnings: list[dict] = []
 
     for series in series_list:
         if not series.get("enabled", False):
@@ -237,9 +264,20 @@ def run_pipeline(target_date: date, dry_run: bool = False):
         if source == "FRED":
             series_id = series.get("series_id")
             obs_start = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
+            report_impact = "HIGH" if series_id in {"DGS3", "DGS10", "DTWEXBGS", "DEXKOUS"} else "LOW"
 
             logger.info(f"Fetching FRED series: {series_id} since {obs_start}")
             raw_data = fred.fetch_series(series_id=series_id, observation_start=obs_start, sort_order="desc", limit=100)
+            if not raw_data:
+                warning = _build_fred_warning(loader, fred, series_id, target_date, "HTTP_OR_EMPTY_RESPONSE", report_impact)
+                fred_warnings.append(warning)
+                logger.warning(
+                    f"FRED series failed: series_id={series_id} error_type={warning['error_type']} "
+                    f"retry_count={warning['retry_count']} fallback_latest_date={warning['fallback_latest_date']} "
+                    f"report_impact={warning['report_impact']}"
+                )
+                continue
+
             observations = raw_data.get("observations", []) if raw_data else []
 
             if observations:
@@ -261,9 +299,26 @@ def run_pipeline(target_date: date, dry_run: bool = False):
                         record.pop(key, None)
                     if record.get("value") is not None:
                         record["value"] = float(record["value"])
-                if not dry_run:
-                    loader.upsert_records("normalized_macro_series", norm_records)
-                total_processed += len(norm_records)
+                norm_records = [record for record in norm_records if record.get("value") is not None]
+                if norm_records:
+                    if not dry_run:
+                        loader.upsert_records("normalized_macro_series", norm_records)
+                    total_processed += len(norm_records)
+                else:
+                    warning = _build_fred_warning(loader, fred, series_id, target_date, "NO_VALID_OBSERVATIONS", report_impact)
+                    fred_warnings.append(warning)
+                    logger.warning(
+                        f"FRED series missing valid observations: series_id={series_id} "
+                        f"fallback_latest_date={warning['fallback_latest_date']} "
+                        f"report_impact={warning['report_impact']}"
+                    )
+            else:
+                warning = _build_fred_warning(loader, fred, series_id, target_date, "NO_OBSERVATIONS", report_impact)
+                fred_warnings.append(warning)
+                logger.warning(
+                    f"FRED series empty: series_id={series_id} fallback_latest_date={warning['fallback_latest_date']} "
+                    f"report_impact={warning['report_impact']}"
+                )
 
         elif source == "YAHOO":
             series_id = series.get("series_id")
@@ -344,6 +399,7 @@ def run_pipeline(target_date: date, dry_run: bool = False):
     from src.collectors.global_index_collector import GlobalIndexCollector
 
     us_skip, us_reason = should_skip_market_job(loader, target_date, "XNYS", "daily_macro_pipeline")
+    logger.info(f"xnys_is_open={not us_skip} reason={us_reason}")
     us_skip_fields = {"sp500", "nasdaq", "sox", "vix"} if us_skip else set()
     global_index = GlobalIndexCollector(config)
     try:
@@ -452,7 +508,7 @@ def run_pipeline(target_date: date, dry_run: bool = False):
         else:
             encountered_error = True
 
-    status = "SUCCESS" if total_processed > 0 and not encountered_error else "WARN"
+    status = "SUCCESS" if total_processed > 0 and not encountered_error and not fred_warnings else "WARN"
     if status != "SUCCESS":
         logger.warning(f"Macro Pipeline finished with warnings for {target_date}. processed={total_processed}")
     if not dry_run:
@@ -463,6 +519,13 @@ def run_pipeline(target_date: date, dry_run: bool = False):
                 f"{us_equity_diagnostic.get('us_equity_market_data_date')} "
                 f"reason={us_equity_diagnostic.get('reason')}"
             )
+        if fred_warnings:
+            fred_summary = ", ".join(
+                f"{item['series_id']}:{item['error_type']}@{item['fallback_latest_date']}"
+                for item in fred_warnings[:5]
+            )
+            error_message = f"{error_message}; " if error_message else ""
+            error_message += f"fred_warnings={fred_summary}"
         loader.insert_log(
             "daily_macro_pipeline",
             target_date.strftime("%Y-%m-%d"),
@@ -479,7 +542,7 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    target_dt = get_current_kst().date()
+    target_dt = get_kst_target_date(get_current_utc())
     if args.date:
         from src.utils.time_utils import parse_date_string
 

@@ -4,10 +4,12 @@ import asyncio
 from datetime import date
 
 from src.jobs import run_daily_derivatives_pipeline as derivatives_pipeline
+from src.jobs import run_daily_feature_pipeline as feature_pipeline
 from src.jobs import run_daily_macro_pipeline as macro_pipeline
 from src.jobs import run_daily_master_pipeline as master_pipeline
 from src.jobs import run_daily_ranking_pipeline as ranking_pipeline
 from src.jobs import run_daily_stock_pipeline as stock_pipeline
+from src.utils.market_data_quality import is_valid_price_row
 from src.utils import trading_calendar as calendar_utils
 
 
@@ -36,7 +38,7 @@ def test_should_not_skip_market_job_open():
 
     skip, reason = calendar_utils.should_skip_market_job(Loader(), date(2026, 5, 6), "XKRX", "test_job")
     assert skip is False
-    assert reason == "MARKET_OPEN"
+    assert "MARKET_OPEN" in reason
 
 
 def test_calendar_missing_uses_weekday_fallback_warning(monkeypatch):
@@ -140,3 +142,33 @@ def test_fred_ecos_macro_job_not_globally_blocked(monkeypatch):
     assert called
     assert data["dxy"] == 100.0
     assert diagnostic["us_equity_market_closed"] is True
+
+
+def test_zero_volume_row_is_not_valid_price():
+    assert is_valid_price_row({"close_price": 232500, "volume": 0, "trading_value": 0}, market_is_open=True) is False
+
+
+def test_feature_pipeline_skips_on_insufficient_valid_prices(monkeypatch):
+    class Loader:
+        def __init__(self):
+            self.logs = []
+
+        def fetch_all(self, table_name, *_args, **_kwargs):
+            if table_name == "normalized_stock_prices_daily":
+                return [{"symbol": "005930", "base_date": "2026-05-06", "close_price": 232500, "volume": 0, "trading_value": 0}]
+            if table_name == "stocks_master":
+                return [{"symbol": "005930", "market": "KOSPI"}]
+            return []
+
+        def insert_log(self, *args):
+            self.logs.append(args)
+
+    loader = Loader()
+    monkeypatch.setattr(feature_pipeline, "load_config", lambda: {"supabase": {"url": "x", "service_role_key": "y"}})
+    monkeypatch.setattr(feature_pipeline, "SupabaseLoader", lambda **_kwargs: loader)
+    monkeypatch.setattr(feature_pipeline, "is_market_open", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(feature_pipeline, "get_previous_trading_day", lambda *_args, **_kwargs: date(2026, 5, 4))
+    status, processed = feature_pipeline.run_feature_pipeline(date(2026, 5, 6))
+    assert status == "SKIPPED_INSUFFICIENT_PRICE_DATA"
+    assert processed == 0
+    assert loader.logs[0][2] == "SKIPPED_INSUFFICIENT_PRICE_DATA"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -53,6 +55,25 @@ def resolve_krx_calendar_name() -> str:
     return resolve_market_calendar_name("XKRX")
 
 
+def load_market_calendar_overrides(path: str = "config/market_calendar_overrides.json") -> dict[tuple[str, str], dict]:
+    override_path = Path(path)
+    if not override_path.exists():
+        logger.info(f"Market calendar override file not found; continuing without overrides: {path}")
+        return {}
+
+    with override_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    overrides: dict[tuple[str, str], dict] = {}
+    for item in payload.get("overrides", []):
+        exchange_code = str(item.get("exchange_code") or "").strip().upper()
+        calendar_date = str(item.get("calendar_date") or "").strip()[:10]
+        if not exchange_code or not calendar_date:
+            continue
+        overrides[(exchange_code, calendar_date)] = dict(item)
+    return overrides
+
+
 def _to_market_timestamp(value, timezone_name: str) -> str | None:
     if value is None or value is pd.NaT:
         return None
@@ -64,6 +85,44 @@ def _to_market_timestamp(value, timezone_name: str) -> str | None:
 
 def _holiday_name(_calendar, _calendar_date: date) -> str | None:
     return None
+
+
+def apply_market_calendar_overrides(rows: list[dict], overrides: dict[tuple[str, str], dict]) -> list[dict]:
+    if not rows or not overrides:
+        return rows
+
+    applied_count = 0
+    override_dates: list[str] = []
+    updated_at = datetime.now(SEOUL_TZ).isoformat()
+    for row in rows:
+        key = (str(row.get("exchange_code") or "").upper(), str(row.get("calendar_date") or "")[:10])
+        override = overrides.get(key)
+        if not override:
+            continue
+
+        row["is_open"] = bool(override.get("is_open", row.get("is_open")))
+        row["open_time"] = override.get("open_time")
+        row["close_time"] = override.get("close_time")
+        row["reason"] = override.get("reason", row.get("reason"))
+        row["holiday_name"] = override.get("holiday_name")
+        row["source"] = override.get("source", "manual_override")
+        row["collected_at"] = updated_at
+        row["updated_at"] = updated_at
+        if row["is_open"] is False:
+            row["open_time"] = None
+            row["close_time"] = None
+
+        applied_count += 1
+        override_dates.append(key[1])
+        logger.warning(
+            "Applied market calendar override: "
+            f"{key[0]} {key[1]} is_open={row['is_open']} "
+            f"reason={row.get('reason')} source={row.get('source')}"
+        )
+
+    if applied_count:
+        logger.info(f"Applied {applied_count} market calendar overrides: {sorted(set(override_dates))}")
+    return rows
 
 
 def fetch_market_calendar(exchange_code: str, start_date: date, end_date: date) -> list[dict]:
@@ -118,6 +177,7 @@ def fetch_market_calendar(exchange_code: str, start_date: date, end_date: date) 
         )
         current += timedelta(days=1)
 
+    rows = apply_market_calendar_overrides(rows, load_market_calendar_overrides())
     logger.info(
         f"Fetched market calendar rows: exchange_code={exchange} calendar_name={calendar_name} "
         f"start_date={start_date} end_date={end_date} total_days={len(rows)}"

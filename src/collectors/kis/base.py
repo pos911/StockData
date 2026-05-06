@@ -42,11 +42,13 @@ class KISBaseCollector:
         auth_manager: KISAuthManager,
         semaphore: asyncio.Semaphore,
         tps_limiter: Optional[RateLimiter] = None,
+        write_enabled: bool = True,
     ):
         self.config = config
         self.auth = auth_manager
         self.semaphore = semaphore
         self.tps_limiter = tps_limiter or RateLimiter(1.8)
+        self.write_enabled = write_enabled
         self.app_key = config.get("kis", {}).get("app_key", "")
         self.app_secret = config.get("kis", {}).get("app_secret", "")
 
@@ -153,6 +155,12 @@ class KISBaseCollector:
         """Run Supabase upserts in a thread executor from async collectors."""
         if not records:
             return
+        if not self.write_enabled:
+            logger.info(
+                "KISBaseCollector write disabled; skipping upsert "
+                f"table={table_name}, records={len(records)}"
+            )
+            return True
         try:
             loop = asyncio.get_running_loop()
             upsert = partial(

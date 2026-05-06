@@ -1,18 +1,46 @@
-from datetime import datetime, date, timezone, timedelta
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+
+
+def get_kst_timezone() -> timezone:
+    return timezone(timedelta(hours=9))
+
 
 def get_current_kst() -> datetime:
-    """한국 표준시 기준 현재 시간을 반환합니다."""
-    kst = timezone(timedelta(hours=9))
-    return datetime.now(kst)
+    """Return the current time in Asia/Seoul."""
+    return datetime.now(get_kst_timezone())
+
+
+def get_current_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def get_kst_target_date(now_utc: datetime | None = None, mode: str = "market") -> date:
+    """Return the KST target date derived from the runner's UTC clock."""
+    del mode
+    current_utc = now_utc or get_current_utc()
+    if current_utc.tzinfo is None:
+        current_utc = current_utc.replace(tzinfo=timezone.utc)
+    return current_utc.astimezone(get_kst_timezone()).date()
+
 
 def parse_date_string(date_str: str, format_str: str = "%Y%m%d") -> date:
-    """문자열 날짜를 date 객체로 파싱합니다."""
-    return datetime.strptime(date_str, format_str).date()
+    """Parse YYYYMMDD or YYYY-MM-DD into a date."""
+    cleaned = str(date_str).strip()
+    if "-" in cleaned and format_str == "%Y%m%d":
+        return datetime.strptime(cleaned, "%Y-%m-%d").date()
+    return datetime.strptime(cleaned, format_str).date()
+
 
 def generate_available_at_for_eod(base_date: date) -> datetime:
-    """
-    EOD (End Of Day) 데이터에 대한 available_at 을 산출합니다.
-    통상적으로 한국 시장은 15:30에 정규장이 마감되므로 보수적으로 16:00 (KST) 로 간주합니다.
-    """
-    kst = timezone(timedelta(hours=9))
-    return datetime(base_date.year, base_date.month, base_date.day, 16, 0, 0, tzinfo=kst)
+    """Return a conservative KST EOD availability timestamp for a market day."""
+    return datetime(
+        base_date.year,
+        base_date.month,
+        base_date.day,
+        16,
+        0,
+        0,
+        tzinfo=get_kst_timezone(),
+    )

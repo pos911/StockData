@@ -6,19 +6,22 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 import json
+import os
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
-from src.utils.market_data_quality import get_latest_valid_price_date
+from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row
 from src.utils.trading_calendar import (
+    get_market_calendar_diagnostic,
     get_latest_trading_day_on_or_before,
     get_next_trading_day,
     get_previous_trading_day,
+    is_market_open,
 )
 from src.utils.config_loader import load_config
-from src.utils.time_utils import get_current_kst
+from src.utils.time_utils import get_current_utc, get_kst_target_date
 from src.utils.symbols import is_q_prefixed_numeric_symbol, normalize_symbol_value
 
 
@@ -64,6 +67,20 @@ EXPECTED_RANKINGS = {
     ("KOSDAQ", "market_cap"),
     ("ETF", "volume"),
     ("ETF", "trading_value"),
+}
+DEFAULT_REPORT_REQUIRED_ETF_SYMBOLS = ("396500", "305720")
+KRX_MARKET_TABLES = {
+    "normalized_stock_prices_daily",
+    "normalized_stock_supply_daily",
+    "normalized_stock_short_selling",
+    "normalized_stock_snapshots_daily",
+    "normalized_market_rankings_daily",
+    "normalized_stock_fundamentals_ratios",
+    "normalized_stock_events_daily",
+    "raw_stock_prices_daily",
+    "raw_stock_supply_daily",
+    "raw_stock_short_selling",
+    "raw_market_rankings",
 }
 
 
@@ -117,13 +134,7 @@ def _symbol_coverage(loader: SupabaseLoader, table: str, target_date: str, activ
         return None, 0
     rows = loader.fetch_all(table, "base_date", target_date, target_date)
     if table == "normalized_stock_prices_daily":
-        rows = [
-            row
-            for row in rows
-            if row.get("close_price") not in (None, "")
-            and row.get("volume") not in (None, "")
-            and row.get("trading_value") not in (None, "")
-        ]
+        rows = [row for row in rows if is_valid_price_row(row, market_is_open=True)]
     covered = {row["symbol"] for row in rows if row.get("symbol") in active}
     missing = len(active - covered)
     coverage = len(covered) / max(len(active), 1)
@@ -139,7 +150,14 @@ def _stale_days(latest_date: str | None, today: date) -> int | None:
         return None
 
 
-def _status(table: str, row_count: int, target_count: int, stale: int | None, coverage: float | None) -> tuple[str, str]:
+def _status(
+    table: str,
+    row_count: int,
+    target_count: int,
+    stale: int | None,
+    coverage: float | None,
+    xkrx_is_open: bool,
+) -> tuple[str, str]:
     if table in LEGACY_TABLES:
         return "LEGACY", "legacy table; not required for current report path"
     if row_count == 0:
@@ -150,6 +168,10 @@ def _status(table: str, row_count: int, target_count: int, stale: int | None, co
         if stale > 5:
             return "WARN_STALE", "short-selling can be sparse, but latest data is stale"
         return "SUCCESS", "short-selling table has recent rows"
+    if not xkrx_is_open and table in KRX_MARKET_TABLES:
+        if target_count > 0:
+            return "WARN_CLOSED_MARKET_ROWS", "rows exist on an XKRX closed date"
+        return "OK_CLOSED_MARKET_NO_ROWS", "target date is an XKRX closed date"
     if coverage is not None:
         if table == "normalized_stock_prices_daily" and coverage < 0.7:
             return "WARN_COVERAGE", f"active symbol coverage={coverage:.1%}"
@@ -160,6 +182,41 @@ def _status(table: str, row_count: int, target_count: int, stale: int | None, co
     if target_count == 0 and stale > 0:
         return "WARN_NO_TARGET_ROWS", "no rows for target date"
     return "SUCCESS", "ok"
+
+
+def _load_report_required_etf_symbols(loader: SupabaseLoader) -> list[str]:
+    symbols: set[str] = set()
+    try:
+        rows = (
+            loader.client.table("static_stock_universe")
+            .select("symbol, market")
+            .eq("enabled", True)
+            .execute()
+            .data
+            or []
+        )
+        for row in rows:
+            if _standardize_market_value(row.get("market")) == "ETF":
+                symbol = normalize_symbol_value(row.get("symbol"))
+                if symbol:
+                    symbols.add(symbol)
+    except Exception:
+        pass
+
+    if os.path.exists("config/stock_universe.json"):
+        try:
+            with open("config/stock_universe.json", "r", encoding="utf-8") as handle:
+                items = json.load(handle)
+            for item in items:
+                if item.get("enabled", True) and _standardize_market_value(item.get("market")) == "ETF":
+                    symbol = normalize_symbol_value(item.get("symbol"))
+                    if symbol:
+                        symbols.add(symbol)
+        except Exception:
+            pass
+    if not symbols:
+        symbols.update(DEFAULT_REPORT_REQUIRED_ETF_SYMBOLS)
+    return sorted(symbols)
 
 
 def _macro_series_status(loader: SupabaseLoader, today: date):
@@ -209,9 +266,7 @@ def _print_price_quality(loader: SupabaseLoader):
     valid_price_rows = sum(
         1
         for row in rows
-        if row.get("close_price") not in (None, "")
-        and row.get("volume") not in (None, "")
-        and row.get("trading_value") not in (None, "")
+        if is_valid_price_row(row, market_is_open=True)
     )
     if snapshot_only_rows > 0:
         status = "FAIL_PRICE_QUALITY"
@@ -614,6 +669,16 @@ def _print_market_calendar_quality(loader: SupabaseLoader, today: date):
     xkrx_next_day = get_next_trading_day(loader, today, "XKRX")
     xnys_previous = get_previous_trading_day(loader, today, "XNYS")
     xnys_next_day = get_next_trading_day(loader, today, "XNYS")
+    xkrx_diag = get_market_calendar_diagnostic(loader, today, "XKRX")
+    xnys_diag = get_market_calendar_diagnostic(loader, today, "XNYS")
+    override_rows = [
+        row for row in (current_year + next_year)
+        if row.get("source") == "manual_override"
+    ]
+    recent_override_rows = [
+        row for row in override_rows
+        if (today - timedelta(days=30)).isoformat() <= str(row.get("calendar_date"))[:10] <= (today + timedelta(days=30)).isoformat()
+    ]
     xkrx_recent_open_count = sum(1 for row in _exchange_rows(recent_rows, "XKRX") if row.get("is_open"))
     xkrx_next_open_count = sum(1 for row in _exchange_rows(upcoming_rows, "XKRX") if row.get("is_open"))
     xkrx_min, xkrx_max = _range(xkrx_current + xkrx_next)
@@ -621,11 +686,15 @@ def _print_market_calendar_quality(loader: SupabaseLoader, today: date):
 
     print("table_exists=True")
     print(f"XKRX calendar range={xkrx_min}..{xkrx_max}")
-    print(f"XKRX today is_open={xkrx_today_rows[0].get('is_open') if xkrx_today_rows else None}")
+    print(f"XKRX today is_open={xkrx_diag.get('is_open')}")
+    print(f"XKRX today source={xkrx_diag.get('source')}")
+    print(f"XKRX today reason={xkrx_diag.get('reason')}")
     print(f"XKRX previous trading day={xkrx_previous}")
     print(f"XKRX next trading day={xkrx_next_day}")
     print(f"XNYS calendar range={xnys_min}..{xnys_max}")
-    print(f"XNYS today is_open={xnys_today_rows[0].get('is_open') if xnys_today_rows else None}")
+    print(f"XNYS today is_open={xnys_diag.get('is_open')}")
+    print(f"XNYS today source={xnys_diag.get('source')}")
+    print(f"XNYS today reason={xnys_diag.get('reason')}")
     print(f"XNYS previous trading day={xnys_previous}")
     print(f"XNYS next trading day={xnys_next_day}")
     print(f"current year XKRX rows={len(xkrx_current)}")
@@ -636,6 +705,19 @@ def _print_market_calendar_quality(loader: SupabaseLoader, today: date):
     print(f"next_30d_open_day_count={xkrx_next_open_count}")
     print(f"XKRX weekday_holiday_count={xkrx_weekday_holidays}")
     print(f"XNYS weekday_holiday_count={xnys_weekday_holidays}")
+    print(f"manual_override_row_count={len(override_rows)}")
+    print(
+        "manual_override_rows_recent="
+        f"{[{ 'exchange_code': row.get('exchange_code'), 'calendar_date': str(row.get('calendar_date'))[:10], 'is_open': row.get('is_open'), 'reason': row.get('reason')} for row in recent_override_rows]}"
+    )
+    specific_20260506 = next(
+        (
+            row for row in xkrx_current + xkrx_next
+            if row.get("exchange_code") == "XKRX" and str(row.get("calendar_date"))[:10] == "2026-05-06"
+        ),
+        None,
+    )
+    print(f"XKRX 2026-05-06 override row={specific_20260506}")
 
     if len(xkrx_current) < 300:
         print("status=WARN_MARKET_CALENDAR_INCOMPLETE")
@@ -722,6 +804,49 @@ def _print_market_closed_ingestion_guardrail(loader: SupabaseLoader, today: date
         print("status=SUCCESS")
 
 
+def _print_open_market_zero_volume_quality(loader: SupabaseLoader, today: date):
+    print("\n=== OPEN MARKET ZERO VOLUME PRICE ROWS ===")
+    latest_xkrx_day = get_latest_trading_day_on_or_before(loader, today, "XKRX")
+    if not latest_xkrx_day:
+        print("status=WARN_NO_XKRX_TRADING_DAY")
+        return
+
+    latest_day_str = latest_xkrx_day.isoformat()
+    price_rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest_day_str, latest_day_str)
+    master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+    market_map = {row.get("symbol"): row.get("market") for row in master_rows if row.get("symbol")}
+    bad_rows = [
+        row for row in price_rows
+        if market_map.get(row.get("symbol")) in {"KOSPI", "KOSDAQ", "ETF", "ETN"}
+        and row.get("close_price") not in (None, "")
+        and (float(row.get("volume") or 0) <= 0 or float(row.get("trading_value") or 0) <= 0)
+    ]
+    print(f"latest_xkrx_open_date={latest_day_str}")
+    print(f"open_market_zero_volume_or_value_rows={len(bad_rows)}")
+    print(f"sample_bad_rows={bad_rows[:10]}")
+    if bad_rows:
+        print("status=WARN_OPEN_MARKET_ZERO_VOLUME_ROWS")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_feature_without_valid_price(loader: SupabaseLoader, today: date):
+    print("\n=== FEATURE WITHOUT VALID PRICE ===")
+    target_date = today.isoformat()
+    feature_rows = loader.fetch_all("feature_store_daily", "base_date", target_date, target_date)
+    valid_price_rows = [
+        row for row in loader.fetch_all("normalized_stock_prices_daily", "base_date", target_date, target_date)
+        if is_valid_price_row(row, market_is_open=True)
+    ]
+    print(f"target_date={target_date}")
+    print(f"feature_row_count={len(feature_rows)}")
+    print(f"valid_price_row_count={len(valid_price_rows)}")
+    if feature_rows and len(valid_price_rows) < 100:
+        print("status=WARN_FEATURE_WITHOUT_VALID_PRICE")
+    else:
+        print("status=SUCCESS")
+
+
 def _print_stock_detail_universe_quality(config: dict, loader: SupabaseLoader):
     print("\n=== STOCK DETAIL UNIVERSE QUALITY ===")
     static_count = 0
@@ -788,14 +913,84 @@ def _print_stock_detail_universe_quality(config: dict, loader: SupabaseLoader):
         print("status=SUCCESS")
 
 
+def _print_report_required_etf_coverage(loader: SupabaseLoader, today: date):
+    print("\n=== REPORT REQUIRED ETF COVERAGE ===")
+    required_symbols = _load_report_required_etf_symbols(loader)
+    latest_xkrx_day = get_latest_trading_day_on_or_before(loader, today, "XKRX")
+    print(f"report_required_etf_universe active ETF count={len(required_symbols)}")
+    print(f"latest_xkrx_trading_day={latest_xkrx_day}")
+    if not required_symbols or not latest_xkrx_day:
+        print("latest price 존재 ETF 수=0")
+        print("missing ETF 목록=[]")
+        print("stale ETF 목록=[]")
+        print("status=WARN_ETF_COVERAGE_UNCONFIGURED")
+        return
+
+    latest_day_str = latest_xkrx_day.isoformat()
+    rows = (
+        loader.client.table("normalized_stock_prices_daily")
+        .select("symbol, base_date, close_price, volume, trading_value")
+        .eq("base_date", latest_day_str)
+        .in_("symbol", required_symbols)
+        .execute()
+        .data
+        or []
+    )
+    fresh_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in rows
+        if is_valid_price_row(row, market_is_open=True)
+    }
+
+    historical_rows = loader.fetch_all(
+        "normalized_stock_prices_daily",
+        "base_date",
+        (latest_xkrx_day - timedelta(days=10)).isoformat(),
+        latest_day_str,
+    )
+    latest_seen = {}
+    for row in historical_rows:
+        symbol = normalize_symbol_value(row.get("symbol"))
+        if symbol not in required_symbols:
+            continue
+        if not is_valid_price_row(row, market_is_open=True):
+            continue
+        if symbol not in latest_seen or str(row.get("base_date")) > str(latest_seen[symbol].get("base_date")):
+            latest_seen[symbol] = row
+
+    missing_symbols = [symbol for symbol in required_symbols if symbol not in fresh_symbols and symbol not in latest_seen]
+    stale_symbols = [
+        symbol
+        for symbol in required_symbols
+        if symbol in latest_seen and str(latest_seen[symbol].get("base_date")) != latest_day_str
+    ]
+
+    print(f"최신 가격 존재 ETF 수={len(fresh_symbols)}")
+    print(f"missing ETF 목록={missing_symbols[:20]}")
+    print(f"stale ETF 목록={stale_symbols[:20]}")
+    if missing_symbols:
+        print("status=FAIL_REPORT_REQUIRED_ETF_MISSING")
+    elif stale_symbols:
+        print("status=WARN_REPORT_REQUIRED_ETF_STALE")
+    else:
+        print("status=SUCCESS")
+
+
 def verify_data():
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
-    today = get_current_kst().date()
+    runner_date_utc = get_current_utc().date()
+    today = get_kst_target_date()
     target_date = today.isoformat()
     active = _active_symbols(loader)
+    xkrx_is_open = is_market_open(loader, today, "XKRX")
+    xnys_is_open = is_market_open(loader, today, "XNYS")
 
     print("\n=== DATA QUALITY SUMMARY ===\n")
+    print(
+        f"runner_date_utc={runner_date_utc} target_date_kst={target_date} "
+        f"xkrx_is_open={xkrx_is_open} xnys_is_open={xnys_is_open}"
+    )
     print(
         f"{'table_name':<38} | {'row_count':<9} | {'latest_date':<12} | "
         f"{'target_count':<12} | {'coverage':<10} | {'missing':<8} | {'stale':<5} | {'status':<18} | note"
@@ -809,7 +1004,7 @@ def verify_data():
             target_count = _target_count(loader, table, date_col, target_date) if row_count else 0
             coverage, missing = _symbol_coverage(loader, table, latest or target_date, active)
             stale = _stale_days(latest, today)
-            status, note = _status(table, row_count, target_count, stale, coverage)
+            status, note = _status(table, row_count, target_count, stale, coverage, xkrx_is_open)
             coverage_text = f"{coverage:.1%}" if coverage is not None else "-"
             print(
                 f"{table:<38} | {row_count:<9} | {latest or 'N/A':<12} | "
@@ -835,7 +1030,10 @@ def verify_data():
     _print_macro_quality(loader, today)
     _print_market_calendar_quality(loader, today)
     _print_market_closed_ingestion_guardrail(loader, today)
+    _print_open_market_zero_volume_quality(loader, today)
+    _print_feature_without_valid_price(loader, today)
     _print_stock_detail_universe_quality(config, loader)
+    _print_report_required_etf_coverage(loader, today)
     _macro_series_status(loader, today)
 
 

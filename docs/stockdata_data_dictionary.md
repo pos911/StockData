@@ -625,6 +625,7 @@ python -m src.jobs.run_monthly_market_calendar_pipeline --all-exchanges --start-
 - `src/utils/market_data_quality.py`는 latest valid price date 후보를 고를 때 이 테이블 기준으로 비거래일을 우선 제외한다.
 - `XKRX`는 한국 주식/ETF/ETN/파생 데이터 수집 여부 판단에 사용한다.
 - `XNYS`는 미국 주식시장성 지표(S&P500, Nasdaq, SOX, VIX) 수집 여부 판단에 사용한다.
+- `manual_override` source row가 있으면 라이브러리 결과보다 항상 우선한다.
 - FRED/ECOS는 각자 공표 주기가 다르므로 `XNYS` 휴장일이어도 전체 macro 수집을 막지 않는다.
 - 휴장일 skip은 오류가 아니라 정상 종료이며 `SKIPPED_MARKET_CLOSED`로 로그를 남긴다.
 
@@ -632,7 +633,7 @@ python -m src.jobs.run_monthly_market_calendar_pipeline --all-exchanges --start-
 - `pandas-market-calendars`와 내부 `exchange_calendars` 버전에 따라 임시공휴일, 특별휴장 반영 시차가 있을 수 있다.
 - 미국시장 특별휴장도 패키지 반영 시점에 따라 지연될 수 있다.
 - 테이블이 아직 생성되지 않았거나 비어 있으면 weekday fallback을 사용하며 warning을 남긴다.
-- 특별휴장 보정이 필요하면 별도 수동 override 정책이 필요하다.
+- 특별휴장 보정이 필요하면 `config/market_calendar_overrides.json`으로 수동 override를 추가한다.
 
 ## 4. 주요 품질 검증 규칙
 
@@ -657,7 +658,11 @@ python -m src.jobs.run_monthly_market_calendar_pipeline --all-exchanges --start-
 close_price is not null
 and volume is not null
 and trading_value is not null
+and volume > 0
+and trading_value > 0
 ```
+
+- 영업일인데 `volume=0` 또는 `trading_value=0`인 row는 snapshot/불완전 row로 간주하고 ranking, feature, report readiness의 유효 가격 후보에서 제외한다.
 
 ### 4.4 Ranking 품질
 

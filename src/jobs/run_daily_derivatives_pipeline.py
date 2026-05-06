@@ -1,7 +1,12 @@
 import argparse
+import sys
 from datetime import date
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
 from src.utils.logger import get_logger
-from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
+from src.utils.time_utils import generate_available_at_for_eod, get_current_utc, get_kst_target_date
 from src.collectors.derivatives_collector import DerivativesCollector
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
@@ -10,11 +15,15 @@ from src.utils.trading_calendar import get_previous_trading_day, should_skip_mar
 logger = get_logger(__name__)
 
 def run_pipeline(target_date: date):
-    logger.info(f"Starting Daily Derivatives Pipeline for {target_date}...")
+    logger.info(
+        f"Starting Daily Derivatives Pipeline for {target_date} "
+        f"(runner_date_utc={get_current_utc().date()}, target_date_kst={target_date})..."
+    )
     
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     skip, reason = should_skip_market_job(loader, target_date, "XKRX", "daily_derivatives_pipeline")
+    logger.info(f"xkrx_is_open={not skip} reason={reason}")
     if skip:
         previous_trading_day = get_previous_trading_day(loader, target_date, "XKRX")
         message = (
@@ -61,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument("--date", type=str, help="YYYYMMDD format")
     args = parser.parse_args()
     
-    target_dt = get_current_kst().date()
+    target_dt = get_kst_target_date(get_current_utc())
     if args.date:
          from src.utils.time_utils import parse_date_string
          target_dt = parse_date_string(args.date)

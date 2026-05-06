@@ -1,0 +1,15 @@
+{
+  "overrides": [
+    {
+      "exchange_code": "XKRX",
+      "calendar_date": "2026-05-06",
+      "is_open": true,
+      "open_time": "2026-05-06T09:00:00+09:00",
+      "close_time": "2026-05-06T15:30:00+09:00",
+      "reason": "manual_override_trading_day",
+      "holiday_name": null,
+      "source": "manual_override",
+      "note": "pandas-market-calendars marked this date as closed, but KRX trading day confirmed by user."
+    }
+  ]
+}

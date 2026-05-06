@@ -48,6 +48,33 @@ def test_weekend_and_holiday_reason(monkeypatch):
     assert mapped["2026-01-01"]["reason"] == "holiday"
 
 
+def test_manual_krx_holiday_override_applies(monkeypatch):
+    monkeypatch.setattr(collector_module, "resolve_market_calendar_name", lambda _exchange: "XKRX")
+    monkeypatch.setattr(collector_module.pmc, "get_calendar", lambda _name: _FakeCalendar())
+    monkeypatch.setattr(
+        collector_module,
+        "load_market_calendar_overrides",
+        lambda *_args, **_kwargs: {
+            ("XKRX", "2026-05-06"): {
+                "exchange_code": "XKRX",
+                "calendar_date": "2026-05-06",
+                "is_open": True,
+                "open_time": "2026-05-06T09:00:00+09:00",
+                "close_time": "2026-05-06T15:30:00+09:00",
+                "reason": "manual_override_trading_day",
+                "holiday_name": None,
+                "source": "manual_override",
+            }
+        },
+    )
+    rows = collector_module.fetch_market_calendar("XKRX", date(2026, 5, 5), date(2026, 5, 6))
+    mapped = {row["calendar_date"]: row for row in rows}
+    assert mapped["2026-05-05"]["is_open"] is False
+    assert mapped["2026-05-06"]["is_open"] is True
+    assert mapped["2026-05-06"]["reason"] == "manual_override_trading_day"
+    assert mapped["2026-05-06"]["source"] == "manual_override"
+
+
 class _Loader:
     def __init__(self, rows=None, fail=False):
         self.rows = rows or []
@@ -108,6 +135,27 @@ def test_weekday_fallback_warning(monkeypatch):
     assert any("CALENDAR_FALLBACK_USED" in message for message in messages)
 
 
+def test_calendar_diagnostic_reports_manual_override():
+    loader = _Loader(
+        rows=[
+            {
+                "calendar_date": "2026-05-06",
+                "exchange_code": "XKRX",
+                "is_open": True,
+                "reason": "manual_override_trading_day",
+                "source": "manual_override",
+                "holiday_name": None,
+                "open_time": "2026-05-06T09:00:00+09:00",
+                "close_time": "2026-05-06T15:30:00+09:00",
+            }
+        ]
+    )
+    diagnostic = calendar_utils.get_market_calendar_diagnostic(loader, date(2026, 5, 6), "XKRX")
+    assert diagnostic["is_open"] is True
+    assert diagnostic["source"] == "manual_override"
+    assert diagnostic["reason"] == "manual_override_trading_day"
+
+
 def test_dry_run_pipeline_skips_write(monkeypatch):
     loader = _Loader()
     monkeypatch.setattr(pipeline_module, "load_config", lambda: {"supabase": {"url": "x", "service_role_key": "y"}})
@@ -157,3 +205,9 @@ def test_pipeline_table_missing_raises(monkeypatch):
         assert "sql/add_market_trading_calendar.sql" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError when market_trading_calendar is missing")
+
+
+def test_cleanup_sql_does_not_delete_macro_tables():
+    with open("sql/fix_calendar_and_bad_rows_202605.sql", "r", encoding="utf-8") as handle:
+        sql_text = handle.read().lower()
+    assert "delete from public.normalized_global_macro_daily" not in sql_text
