@@ -87,6 +87,94 @@ class KRXCollector:
     def fetch_etn_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
         return self.fetch_krx_api("https://data-dbg.krx.co.kr/svc/apis/etp/etn_bydd_trd", target_date)
 
+    def fetch_stock_daily_trading(self, target_date: date) -> List[Dict[str, Any]]:
+        for endpoint in (
+            "https://data.krx.co.kr/svc/apis/sto/stk_bydd_clpr",
+            "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_clpr",
+            "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd",
+        ):
+            rows = self.fetch_krx_api(endpoint, target_date)
+            if rows:
+                return rows
+        return self._fetch_stock_daily_trading_pykrx(target_date)
+
+    def normalize_krx_stock_price_row(self, row: Dict[str, Any], target_date: date) -> Optional[Dict[str, Any]]:
+        symbol = normalize_symbol_value(
+            row.get("ISU_SRT_CD")
+            or row.get("ISU_CD")
+            or row.get("isu_srt_cd")
+            or row.get("isu_cd")
+        )
+        market_value = str(row.get("MKT_ID") or row.get("MKT_NM") or row.get("mktId") or row.get("mktNm") or "").strip().upper()
+        market = None
+        if market_value in {"STK", "KOSPI"} or "KOSPI" in market_value:
+            market = "KOSPI"
+        elif market_value in {"KSQ", "KOSDAQ"} or "KOSDAQ" in market_value:
+            market = "KOSDAQ"
+        if not symbol or not market:
+            return None
+
+        return {
+            "symbol": symbol,
+            "name": row.get("ISU_ABBRV") or row.get("ISU_NM") or row.get("isu_abbrv") or row.get("isu_nm"),
+            "market": market,
+            "asset_type": "STOCK",
+            "base_date": self._format_base_date(row.get("BAS_DD") or row.get("basDd"), target_date),
+            "open_price": self._parse_numeric(row.get("TDD_OPNPRC") or row.get("tdd_opnprc")),
+            "high_price": self._parse_numeric(row.get("TDD_HGPRC") or row.get("tdd_hgprc")),
+            "low_price": self._parse_numeric(row.get("TDD_LWPRC") or row.get("tdd_lwprc")),
+            "close_price": self._parse_numeric(row.get("TDD_CLSPRC") or row.get("tdd_clsprc")),
+            "volume": self._parse_numeric(row.get("ACC_TRDVOL") or row.get("TDD_VLM") or row.get("acc_trdvol") or row.get("tdd_vlm")),
+            "trading_value": self._parse_numeric(row.get("ACC_TRDVAL") or row.get("TDD_AMT") or row.get("acc_trdval") or row.get("tdd_amt")),
+            "market_cap": self._parse_numeric(row.get("MKTCAP") or row.get("mktcap")),
+            "outstanding_shares": self._parse_numeric(row.get("LIST_SHRS") or row.get("list_shrs")),
+            "change_rate": self._parse_numeric(row.get("FLUC_RT") or row.get("fluc_rt")),
+            "source": "KRX",
+            "available_at": generate_available_at_for_eod(target_date).isoformat(),
+        }
+
+    def _fetch_stock_daily_trading_pykrx(self, target_date: date) -> List[Dict[str, Any]]:
+        try:
+            from pykrx import stock
+        except Exception as exc:
+            logger.warning(f"pykrx fallback unavailable for stock daily trading: {exc}")
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for market_name, market_code in (("KOSPI", "KOSPI"), ("KOSDAQ", "KOSDAQ")):
+            try:
+                ohlcv = stock.get_market_ohlcv_by_ticker(target_date.strftime("%Y%m%d"), market=market_code)
+                cap = stock.get_market_cap_by_ticker(target_date.strftime("%Y%m%d"), market=market_code)
+            except Exception as exc:
+                logger.warning(f"pykrx stock daily trading fallback failed for {market_name}: {exc}")
+                continue
+            if ohlcv is None or ohlcv.empty:
+                logger.warning(f"pykrx stock daily trading fallback returned no OHLCV rows for {market_name}.")
+                continue
+            cap = cap if cap is not None else pd.DataFrame()
+            for ticker, row in ohlcv.iterrows():
+                cap_row = cap.loc[ticker] if not cap.empty and ticker in cap.index else {}
+                rows.append(
+                    {
+                        "BAS_DD": target_date.strftime("%Y%m%d"),
+                        "ISU_SRT_CD": str(ticker),
+                        "ISU_ABBRV": "",
+                        "MKT_ID": "STK" if market_name == "KOSPI" else "KSQ",
+                        "MKT_NM": market_name,
+                        "TDD_OPNPRC": row.get("시가"),
+                        "TDD_HGPRC": row.get("고가"),
+                        "TDD_LWPRC": row.get("저가"),
+                        "TDD_CLSPRC": row.get("종가"),
+                        "ACC_TRDVOL": row.get("거래량"),
+                        "ACC_TRDVAL": row.get("거래대금"),
+                        "MKTCAP": cap_row.get("시가총액") if isinstance(cap_row, pd.Series) else None,
+                        "LIST_SHRS": cap_row.get("상장주식수") if isinstance(cap_row, pd.Series) else None,
+                        "FLUC_RT": row.get("등락률"),
+                    }
+                )
+            logger.info(f"pykrx fallback stock daily trading loaded market={market_name} row_count={len(ohlcv)}")
+        return rows
+
     def normalize_krx_etp_row(self, row: Dict[str, Any], market: str, asset_type: str, target_date: date) -> Dict[str, Any]:
         symbol = normalize_symbol_value(row.get("ISU_CD"))
         return {

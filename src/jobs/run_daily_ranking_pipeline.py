@@ -18,7 +18,7 @@ from src.collectors.kis.domestic import KISDomesticStockCollector
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
-from src.utils.market_data_quality import get_latest_valid_price_date
+from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row
 from src.utils.symbols import normalize_symbol_value
 from src.utils.time_utils import generate_available_at_for_eod, get_current_utc, get_kst_target_date, parse_date_string
 from src.utils.trading_calendar import get_previous_trading_day, should_skip_market_job
@@ -38,6 +38,9 @@ RANKING_LIMITS = {
     "ETF": 20,
     "ETN": 20,
 }
+
+KR_STOCK_MARKETS = {"KOSPI", "KOSDAQ"}
+MIN_KR_STOCK_VALID_ROWS_FOR_RANKING = 100
 
 
 def _parse_numeric(value):
@@ -100,6 +103,7 @@ def _persist_rankings(
     rank_type: str,
     source: str,
     rows: list[dict[str, Any]],
+    source_base_date: str | None = None,
     replace_existing: bool = True,
 ) -> int:
     base_date = target_date.strftime("%Y-%m-%d")
@@ -109,7 +113,11 @@ def _persist_rankings(
 
     raw_records = []
     normalized_records = []
+    supports_source_base_date = _supports_source_base_date(loader)
     for rank, row in enumerate(rows, 1):
+        raw_data = dict(row["raw_data"])
+        raw_data.setdefault("source_base_date", source_base_date)
+        raw_data.setdefault("ranking_base_date", base_date)
         raw_records.append(
             {
                 "source": source,
@@ -119,32 +127,49 @@ def _persist_rankings(
                 "symbol": row["symbol"],
                 "name": row["name"],
                 "raw_rank": rank,
-                "raw_data": json.dumps(row["raw_data"], ensure_ascii=False),
+                "raw_data": json.dumps(raw_data, ensure_ascii=False),
                 "available_at": available_at,
             }
         )
-        normalized_records.append(
-            {
-                "base_date": base_date,
-                "market": market,
-                "rank_type": rank_type,
-                "rank": rank,
-                "symbol": row["symbol"],
-                "name": row["name"],
-                "volume": row.get("volume"),
-                "trading_value": row.get("trading_value"),
-                "market_cap": row.get("market_cap"),
-                "change_rate": row.get("change_rate"),
-                "metric_value": row.get("metric_value"),
-                "source": source,
-                "available_at": available_at,
-            }
-        )
+        normalized_row = {
+            "base_date": base_date,
+            "market": market,
+            "rank_type": rank_type,
+            "rank": rank,
+            "symbol": row["symbol"],
+            "name": row["name"],
+            "volume": row.get("volume"),
+            "trading_value": row.get("trading_value"),
+            "market_cap": row.get("market_cap"),
+            "change_rate": row.get("change_rate"),
+            "metric_value": row.get("metric_value"),
+            "source": source,
+            "available_at": available_at,
+        }
+        if supports_source_base_date:
+            normalized_row["source_base_date"] = source_base_date
+        normalized_records.append(normalized_row)
     if raw_records:
         loader.upsert_records("raw_market_rankings", raw_records)
     if normalized_records:
         loader.upsert_records("normalized_market_rankings_daily", normalized_records)
     return len(normalized_records)
+
+
+def _supports_source_base_date(loader: SupabaseLoader) -> bool:
+    if getattr(loader, "_source_base_date_supported", None) is not None:
+        return bool(loader._source_base_date_supported)
+    try:
+        loader.client.table("normalized_market_rankings_daily").select("source_base_date").limit(1).execute()
+        loader._source_base_date_supported = True
+    except Exception as exc:
+        logger.warning(
+            "normalized_market_rankings_daily.source_base_date is not available yet. "
+            "Run sql/add_ranking_source_base_date.sql to persist ranking source dates. "
+            f"detail={exc}"
+        )
+        loader._source_base_date_supported = False
+    return bool(loader._source_base_date_supported)
 
 
 def _classify_kis_volume_rows(rows: list[dict[str, Any]], master_map: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -227,12 +252,10 @@ def _build_price_based_rankings(
                 continue
             if master.get("market") != market:
                 continue
+            if not is_valid_price_row(row, market_is_open=True):
+                continue
             metric_value = row.get(metric_key)
             if metric_value in (None, ""):
-                continue
-            if rank_type == "volume" and row.get("volume") in (None, ""):
-                continue
-            if rank_type == "trading_value" and row.get("trading_value") in (None, ""):
                 continue
             if rank_type == "market_cap" and row.get("market_cap") in (None, ""):
                 continue
@@ -252,6 +275,7 @@ def _build_price_based_rankings(
                         "original_kis_count": original_kis_count,
                         "master_market": master.get("market"),
                         "master_asset_type": master.get("asset_type"),
+                        "source_base_date": row_base_date,
                     },
                 }
             )
@@ -301,6 +325,25 @@ def _build_price_based_rankings(
             f"{market} {rank_type} ranking has only {len(filtered)} valid price candidates on price_base_date={price_base_date}"
         )
     return source, filtered[:limit], price_base_date
+
+
+def _count_valid_kr_stock_rows(loader: SupabaseLoader, target_date: date, master_map: dict[str, dict[str, Any]]) -> tuple[int, dict[str, int]]:
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", target_date_str, target_date_str)
+    market_counts = defaultdict(int)
+    total = 0
+    for row in rows:
+        if not is_valid_price_row(row, market_is_open=True):
+            continue
+        master = master_map.get(normalize_symbol_value(row.get("symbol")))
+        if not master:
+            continue
+        market = master.get("market")
+        asset_type = master.get("asset_type")
+        if market in KR_STOCK_MARKETS and asset_type == "STOCK":
+            market_counts[market] += 1
+            total += 1
+    return total, dict(market_counts)
 
 
 def _select_volume_rankings(
@@ -365,6 +408,20 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
             )
         return
     master_map = _load_master_map(loader)
+    kr_valid_rows, kr_market_counts = _count_valid_kr_stock_rows(loader, target_date, master_map)
+    logger.info(
+        f"target_date_valid_kr_stock_rows={kr_valid_rows} market_counts={kr_market_counts} "
+        f"minimum_required={MIN_KR_STOCK_VALID_ROWS_FOR_RANKING}"
+    )
+    skip_kr_stock_rankings = kr_valid_rows < MIN_KR_STOCK_VALID_ROWS_FOR_RANKING
+    skip_message = ""
+    if skip_kr_stock_rankings:
+        skip_message = (
+            f"Insufficient KOSPI/KOSDAQ valid stock price rows on {target_date:%Y-%m-%d}; "
+            f"rows={kr_valid_rows}, market_counts={kr_market_counts}. "
+            "Skipping KOSPI/KOSDAQ ranking generation for target_date."
+        )
+        logger.warning(skip_message)
 
     auth_mgr = KISAuthManager(config)
     await auth_mgr.initialize()
@@ -377,6 +434,11 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
         ranking_total = 0
 
         for market in ("KOSPI", "KOSDAQ", "ETF", "ETN"):
+            if skip_kr_stock_rankings and market in KR_STOCK_MARKETS:
+                if not dry_run:
+                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "volume")
+                logger.warning(f"Skipping {market} volume ranking because target-date stock prices are insufficient.")
+                continue
             source, volume_rows = _select_volume_rankings(
                 loader=loader,
                 target_date=target_date,
@@ -384,33 +446,98 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
                 kis_rows=classified.get(market, []),
                 master_map=master_map,
             )
+            source_base_date = target_date.strftime("%Y-%m-%d") if source == "KIS" else (
+                volume_rows[0]["raw_data"].get("source_base_date") if volume_rows else None
+            )
+            if market in KR_STOCK_MARKETS and source_base_date != target_date.strftime("%Y-%m-%d"):
+                if not dry_run:
+                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "volume")
+                logger.warning(
+                    f"Skipping {market} volume ranking because source_base_date={source_base_date} "
+                    f"does not match target_date={target_date:%Y-%m-%d}."
+                )
+                continue
             if not dry_run:
-                ranking_total += _persist_rankings(loader, target_date, market, "volume", source, volume_rows)
+                ranking_total += _persist_rankings(
+                    loader,
+                    target_date,
+                    market,
+                    "volume",
+                    source,
+                    volume_rows,
+                    source_base_date=source_base_date,
+                )
             else:
-                logger.info(f"[dry-run] {market} volume source={source} rows={len(volume_rows)}")
+                logger.info(
+                    f"[dry-run] {market} volume source={source} rows={len(volume_rows)} "
+                    f"source_base_date={source_base_date}"
+                )
 
         for market, limit in RANKING_LIMITS.items():
+            if skip_kr_stock_rankings and market in KR_STOCK_MARKETS:
+                if not dry_run:
+                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "trading_value")
+                logger.warning(f"Skipping {market} trading_value ranking because target-date stock prices are insufficient.")
+                continue
             source, rows, price_base_date = _build_price_based_rankings(
                 loader, target_date, master_map, market, "trading_value", limit
             )
+            if market in KR_STOCK_MARKETS and price_base_date != target_date.strftime("%Y-%m-%d"):
+                if not dry_run:
+                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "trading_value")
+                logger.warning(
+                    f"Skipping {market} trading_value ranking because source_base_date={price_base_date} "
+                    f"does not match target_date={target_date:%Y-%m-%d}."
+                )
+                continue
             logger.info(f"{market} trading_value ranking price_base_date={price_base_date} source={source} rows={len(rows)}")
             if not dry_run:
-                _persist_rankings(loader, target_date, market, "trading_value", source, rows)
+                _persist_rankings(
+                    loader,
+                    target_date,
+                    market,
+                    "trading_value",
+                    source,
+                    rows,
+                    source_base_date=price_base_date if source != "KIS" else target_date.strftime("%Y-%m-%d"),
+                )
 
         for market, limit in RANKING_LIMITS.items():
+            if skip_kr_stock_rankings and market in KR_STOCK_MARKETS:
+                if not dry_run:
+                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "market_cap")
+                logger.warning(f"Skipping {market} market_cap ranking because target-date stock prices are insufficient.")
+                continue
             source, rows, price_base_date = _build_price_based_rankings(
                 loader, target_date, master_map, market, "market_cap", limit
             )
+            if market in KR_STOCK_MARKETS and price_base_date != target_date.strftime("%Y-%m-%d"):
+                if not dry_run:
+                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "market_cap")
+                logger.warning(
+                    f"Skipping {market} market_cap ranking because source_base_date={price_base_date} "
+                    f"does not match target_date={target_date:%Y-%m-%d}."
+                )
+                continue
             logger.info(f"{market} market_cap ranking price_base_date={price_base_date} source={source} rows={len(rows)}")
             if not dry_run:
-                _persist_rankings(loader, target_date, market, "market_cap", source, rows)
+                _persist_rankings(
+                    loader,
+                    target_date,
+                    market,
+                    "market_cap",
+                    source,
+                    rows,
+                    source_base_date=price_base_date if source != "KIS" else target_date.strftime("%Y-%m-%d"),
+                )
 
         if not dry_run:
             loader.insert_log(
                 "daily_ranking_pipeline",
                 target_date.strftime("%Y-%m-%d"),
-                "SUCCESS",
+                "SKIPPED_INSUFFICIENT_PRICE_DATA" if skip_kr_stock_rankings else "SUCCESS",
                 ranking_total,
+                skip_message,
             )
     finally:
         await auth_mgr.shutdown()

@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS raw_market_rankings (
 
 CREATE TABLE IF NOT EXISTS normalized_market_rankings_daily (
     base_date DATE NOT NULL,
+    source_base_date DATE,
     market VARCHAR(30) NOT NULL,
     rank_type VARCHAR(50) NOT NULL,
     rank INT NOT NULL,

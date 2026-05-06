@@ -294,10 +294,15 @@ class SupabaseLoader:
     def insert_log(self, job_name: str, target_date: str, status: str, records_processed: int, error_message: str = ""):
         """파이프라인 실행 로그 기록"""
         try:
+            safe_status = str(status or "")[:20]
+            if safe_status != status:
+                logger.warning(
+                    f"pipeline_run_logs.status truncated from '{status}' to '{safe_status}' to fit VARCHAR(20)."
+                )
             self.client.table("pipeline_run_logs").insert({
                 "job_name": job_name,
                 "target_date": target_date,
-                "status": status,
+                "status": safe_status,
                 "records_processed": records_processed,
                 "error_message": error_message
             }).execute()

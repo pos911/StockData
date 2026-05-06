@@ -1,6 +1,6 @@
 ﻿# StockData 데이터 적재 명세서
 
-_Last updated: 2026-05-05_
+_Last updated: 2026-05-06_
 
 이 문서는 `pos911/StockData`가 Supabase에 적재하는 주요 데이터의 목적, 원천, 테이블 구조, 컬럼 의미, 단위, 사용 시 주의사항을 정리한 데이터 사전이다.
 
@@ -41,6 +41,7 @@ _Last updated: 2026-05-05_
 ```text
 1. run_daily_master_pipeline.py
    - KRX 기준 stocks_master 갱신
+   - KRX KOSPI/KOSDAQ 전종목 일별시세를 raw/normalized price에 적재
    - ETF/ETN KRX ETP 일별매매정보를 raw/normalized price에 적재
 
 2. run_daily_ranking_pipeline.py
@@ -290,6 +291,7 @@ KIS 등에서 받는 종목 스냅샷성 지표 저장. 가격 테이블에 넣�
 | change_rate | 등락률 | % | 원천에 없으면 null |
 | metric_value | 랭킹 기준값 | rank_type별 다름 | volume/trading_value/market_cap 중 하나 |
 | source | 생성 원천 | KIS, KRX, VALID_PRICE_FALLBACK | report 진단에 사용 |
+| source_base_date | 실제 랭킹 계산에 사용한 가격 기준일 | 2026-05-04 | `VALID_PRICE_FALLBACK`이면 `base_date`와 다를 수 있음 |
 | available_at / updated_at | 시각 | timestamp |  |
 
 ### source 의미
@@ -305,6 +307,8 @@ KIS 등에서 받는 종목 스냅샷성 지표 저장. 가격 테이블에 넣�
 - `q_prefix rows = 0`
 - KOSPI/KOSDAQ volume count > 0
 - trading_value/market_cap ranking 존재
+- KOSPI/KOSDAQ은 target_date 기준 유효 가격 row가 충분할 때만 target_date ranking 생성
+- `VALID_PRICE_FALLBACK` row는 `source_base_date` 또는 raw_data `price_base_date`가 반드시 있어야 함
 
 ---
 
@@ -769,6 +773,13 @@ limit 10;
 - `us3y` 추가: FRED `DGS3` 기반 미국 3년물.
 - `normalized_global_macro_daily.us3y` 컬럼 추가.
 - ETF/ETN ranking quality SUCCESS 확인.
+
+### 2026-05-06
+
+- KRX KOSPI/KOSDAQ 전종목 일별시세 적재 경로 추가.
+- `normalized_stock_prices_daily` 유효 가격 row 기준을 `close_price not null and volume > 0 and trading_value > 0`로 통일.
+- KOSPI/KOSDAQ target_date 가격이 부족하면 target_date 한국 주식 ranking 생성 차단.
+- `normalized_market_rankings_daily.source_base_date` 도입 및 `VALID_PRICE_FALLBACK` metadata 강화.
 
 ---
 

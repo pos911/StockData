@@ -22,6 +22,8 @@ logger = get_logger(__name__)
 
 MASTER_MARKETS = {"KOSPI", "KOSDAQ", "ETF", "ETN"}
 ETP_LOOKBACK_DAYS = 10
+MIN_SUCCESS_STOCK_PRICE_ROWS = 2000
+MIN_WARN_STOCK_PRICE_ROWS = 100
 
 
 def _has_meaningful_etp_prices(rows: list[dict]) -> bool:
@@ -38,6 +40,29 @@ def _raw_price_record(row: dict, target_date: date) -> dict:
         "base_date": row["base_date"],
         "raw_data": json.dumps(row, ensure_ascii=False),
         "available_at": generate_available_at_for_eod(target_date).isoformat(),
+    }
+
+
+def _normalized_price_record(row: dict) -> dict | None:
+    close_price = row.get("close_price")
+    volume = row.get("volume")
+    trading_value = row.get("trading_value")
+    if close_price in (None, "") or volume in (None, "") or trading_value in (None, ""):
+        return None
+    if float(volume or 0) <= 0 or float(trading_value or 0) <= 0:
+        return None
+    return {
+        "symbol": row["symbol"],
+        "base_date": row["base_date"],
+        "open_price": row.get("open_price"),
+        "high_price": row.get("high_price"),
+        "low_price": row.get("low_price"),
+        "close_price": close_price,
+        "volume": volume,
+        "trading_value": trading_value,
+        "market_cap": row.get("market_cap"),
+        "outstanding_shares": row.get("outstanding_shares"),
+        "available_at": row.get("available_at"),
     }
 
 
@@ -148,23 +173,44 @@ def _collect_krx_etp_master_and_prices(
             )
         )
         raw_price_rows.append(_raw_price_record(normalized, target_date))
-        if normalized.get("close_price") is not None:
-            normalized_price_rows.append(
-                {
-                    "symbol": normalized["symbol"],
-                    "base_date": normalized["base_date"],
-                    "open_price": normalized["open_price"],
-                    "high_price": normalized["high_price"],
-                    "low_price": normalized["low_price"],
-                    "close_price": normalized["close_price"],
-                    "volume": normalized["volume"],
-                    "trading_value": normalized["trading_value"],
-                    "market_cap": normalized["market_cap"],
-                    "outstanding_shares": normalized["outstanding_shares"],
-                    "available_at": normalized["available_at"],
-                }
-            )
+        normalized_price = _normalized_price_record(normalized)
+        if normalized_price:
+            normalized_price_rows.append(normalized_price)
     return master_rows, raw_price_rows, normalized_price_rows
+
+
+def _collect_krx_stock_prices(
+    krx: KRXCollector,
+    target_date: date,
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    rows = krx.fetch_stock_daily_trading(target_date)
+    raw_price_rows: list[dict] = []
+    normalized_price_rows: list[dict] = []
+    counters = {
+        "stock_daily_raw_rows": 0,
+        "stock_daily_normalized_rows": 0,
+        "kospi_price_rows": 0,
+        "kosdaq_price_rows": 0,
+        "zero_volume_excluded_rows": 0,
+    }
+
+    for row in rows:
+        normalized = krx.normalize_krx_stock_price_row(row, target_date)
+        if not normalized:
+            continue
+        raw_price_rows.append(_raw_price_record({**normalized, "raw_response": row}, target_date))
+        counters["stock_daily_raw_rows"] += 1
+        normalized_price = _normalized_price_record(normalized)
+        if normalized_price:
+            normalized_price_rows.append(normalized_price)
+            counters["stock_daily_normalized_rows"] += 1
+            if normalized["market"] == "KOSPI":
+                counters["kospi_price_rows"] += 1
+            elif normalized["market"] == "KOSDAQ":
+                counters["kosdaq_price_rows"] += 1
+        else:
+            counters["zero_volume_excluded_rows"] += 1
+    return raw_price_rows, normalized_price_rows, counters
 
 
 def _fetch_etp_rows_with_lookback(krx: KRXCollector, target_date: date, market: str) -> tuple[list[dict], date | None]:
@@ -269,6 +315,7 @@ def run_pipeline(target_date: date) -> None:
     existing_active_map = _load_existing_active_map(loader)
 
     stock_master_rows = _collect_krx_stock_master(krx, target_date, existing_active_map, protected_symbols)
+    stock_raw_prices, stock_normalized_prices, stock_price_stats = _collect_krx_stock_prices(krx, target_date)
     etf_rows, etf_data_date = _fetch_etp_rows_with_lookback(krx, target_date, "ETF")
     etn_rows, etn_data_date = _fetch_etp_rows_with_lookback(krx, target_date, "ETN")
 
@@ -293,6 +340,10 @@ def run_pipeline(target_date: date) -> None:
 
     master_rows = list(deduped_master.values())
     loader.upsert_records("stocks_master", master_rows)
+    if stock_raw_prices:
+        loader.upsert_records("raw_stock_prices_daily", stock_raw_prices)
+    if stock_normalized_prices:
+        loader.upsert_records("normalized_stock_prices_daily", stock_normalized_prices)
     if etf_raw_prices:
         loader.upsert_records("raw_stock_prices_daily", etf_raw_prices)
     if etn_raw_prices:
@@ -313,6 +364,12 @@ def run_pipeline(target_date: date) -> None:
     logger.info(f"KOSDAQ count: {counter.get('KOSDAQ', 0)}")
     logger.info(f"ETF count: {counter.get('ETF', 0)}")
     logger.info(f"ETN count: {counter.get('ETN', 0)}")
+    logger.info(f"stock_price_data_date: {target_date:%Y-%m-%d}")
+    logger.info(f"stock_daily_raw_rows: {stock_price_stats['stock_daily_raw_rows']}")
+    logger.info(f"stock_daily_normalized_rows: {stock_price_stats['stock_daily_normalized_rows']}")
+    logger.info(f"kospi_price_rows: {stock_price_stats['kospi_price_rows']}")
+    logger.info(f"kosdaq_price_rows: {stock_price_stats['kosdaq_price_rows']}")
+    logger.info(f"zero_volume_excluded_rows: {stock_price_stats['zero_volume_excluded_rows']}")
     logger.info(f"ETF price rows: raw={len(etf_raw_prices)} normalized={len(etf_normalized_prices)} data_date={etf_data_date}")
     logger.info(f"ETN price rows: raw={len(etn_raw_prices)} normalized={len(etn_normalized_prices)} data_date={etn_data_date}")
     logger.info(f"total master count: {len(master_rows)}")
@@ -321,7 +378,18 @@ def run_pipeline(target_date: date) -> None:
     logger.info(f"static protected count: {len(protected_symbols)}")
     logger.info(f"deactivated count: {deactivated_count}")
 
-    loader.insert_log("daily_master_pipeline", target_date.strftime("%Y-%m-%d"), "SUCCESS", len(master_rows))
+    normalized_stock_rows = stock_price_stats["stock_daily_normalized_rows"]
+    if normalized_stock_rows >= MIN_SUCCESS_STOCK_PRICE_ROWS:
+        status = "SUCCESS"
+        message = ""
+    elif normalized_stock_rows >= MIN_WARN_STOCK_PRICE_ROWS:
+        status = "WARN_PARTIAL_STOCK_PRICE_ROWS"
+        message = f"KRX stock price rows are partial for {target_date:%Y-%m-%d}: {normalized_stock_rows}"
+    else:
+        status = "WARN_INSUFFICIENT_STOCK_PRICE_ROWS"
+        message = f"KRX stock price rows are insufficient for {target_date:%Y-%m-%d}: {normalized_stock_rows}"
+
+    loader.insert_log("daily_master_pipeline", target_date.strftime("%Y-%m-%d"), status, len(master_rows), message)
 
 
 if __name__ == "__main__":

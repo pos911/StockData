@@ -442,6 +442,17 @@ def _print_market_ranking_quality(loader: SupabaseLoader):
     ranking_rows = loader.fetch_all("normalized_market_rankings_daily", "base_date", latest, latest)
     master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
     master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+    latest_dt = date.fromisoformat(latest)
+    latest_price_day = get_latest_trading_day_on_or_before(loader, latest_dt, "XKRX")
+    price_rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest, latest)
+    kr_valid_rows = 0
+    for price_row in price_rows:
+        master = master_map.get(normalize_symbol_value(price_row.get("symbol")))
+        if not master:
+            continue
+        if _standardize_market_value(master.get("market")) in {"KOSPI", "KOSDAQ"} and master.get("asset_type") == "STOCK":
+            if is_valid_price_row(price_row, market_is_open=True):
+                kr_valid_rows += 1
     combos = {(row.get("market"), row.get("rank_type")) for row in ranking_rows}
     missing_expected_rankings = sorted(f"{market}:{rank_type}" for market, rank_type in EXPECTED_RANKINGS if (market, rank_type) not in combos)
 
@@ -477,6 +488,8 @@ def _print_market_ranking_quality(loader: SupabaseLoader):
         print("status=FAIL_SYMBOL_NORMALIZATION")
     elif any(stats["market_mismatch_rows"] > 0 for (market, _), stats in summary.items() if market == "KOSPI"):
         print("status=FAIL_RANKING_MARKET_MISMATCH")
+    elif latest_price_day and latest == latest_price_day.isoformat() and kr_valid_rows < 100:
+        print("status=OK_SKIPPED_INSUFFICIENT_PRICE_DATA")
     elif ("KOSDAQ", "volume") not in combos:
         print("status=FAIL_RANKING_KOSDAQ")
     elif ("KOSDAQ", "trading_value") not in combos:
@@ -535,6 +548,15 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
     ranking_rows = loader.fetch_all("normalized_market_rankings_daily", "base_date", latest, latest)
     master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
     master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+    target_price_rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest, latest)
+    kr_valid_rows = 0
+    for price_row in target_price_rows:
+        master = master_map.get(normalize_symbol_value(price_row.get("symbol")))
+        if not master:
+            continue
+        if _standardize_market_value(master.get("market")) in {"KOSPI", "KOSDAQ"} and master.get("asset_type") == "STOCK":
+            if is_valid_price_row(price_row, market_is_open=True):
+                kr_valid_rows += 1
     mismatch_rows = 0
     q_prefix_rows = 0
     volume_counts_by_source = {"KOSPI": {}, "KOSDAQ": {}, "ETF": {}, "ETN": {}}
@@ -571,7 +593,9 @@ def _print_ranking_source_quality(loader: SupabaseLoader, today: date):
     print(f"q_prefix rows={q_prefix_rows}")
     print(f"stale ranking rows={0 if stale_days is None else stale_days}")
     print(f"selected valid price date={quality.get('selected_price_base_date')}")
-    if volume_total["KOSDAQ"] == 0:
+    if latest == today.isoformat() and kr_valid_rows < 100:
+        print("status=OK_SKIPPED_INSUFFICIENT_PRICE_DATA")
+    elif volume_total["KOSDAQ"] == 0:
         print("status=FAIL_KOSDAQ_VOLUME_RANK")
     elif mismatch_rows > 0:
         print("status=FAIL_RANKING_MARKET_MISMATCH")
@@ -731,6 +755,158 @@ def _print_market_calendar_quality(loader: SupabaseLoader, today: date):
         print("status=WARN_TODAY_CALENDAR_MISSING")
     elif xkrx_next_day is None:
         print("status=WARN_NEXT_TRADING_DAY_MISSING")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_price_coverage_by_market(loader: SupabaseLoader, today: date):
+    print("\n=== PRICE COVERAGE BY MARKET ===")
+    latest_xkrx_trading_day = get_latest_trading_day_on_or_before(loader, today, "XKRX")
+    target_date = today.isoformat()
+    print(f"latest_xkrx_trading_day={latest_xkrx_trading_day}")
+    print(f"target_date={target_date}")
+    if not latest_xkrx_trading_day:
+        print("status=WARN_NO_XKRX_TRADING_DAY")
+        return
+
+    latest_day_str = latest_xkrx_trading_day.isoformat()
+    rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest_day_str, latest_day_str)
+    master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+    master_map = {
+        normalize_symbol_value(row.get("symbol")): _standardize_market_value(row.get("market"))
+        for row in master_rows
+        if row.get("symbol")
+    }
+    summary = {
+        "KOSPI": {"total": 0, "valid": 0, "zero": 0},
+        "KOSDAQ": {"total": 0, "valid": 0, "zero": 0},
+        "ETF": {"total": 0, "valid": 0, "zero": 0},
+        "ETN": {"total": 0, "valid": 0, "zero": 0},
+    }
+    for row in rows:
+        market = master_map.get(normalize_symbol_value(row.get("symbol")))
+        if market not in summary:
+            continue
+        summary[market]["total"] += 1
+        if is_valid_price_row(row, market_is_open=True):
+            summary[market]["valid"] += 1
+        elif row.get("close_price") not in (None, "") and (
+            float(row.get("volume") or 0) <= 0 or float(row.get("trading_value") or 0) <= 0
+        ):
+            summary[market]["zero"] += 1
+
+    for market in ("KOSPI", "KOSDAQ", "ETF", "ETN"):
+        stats = summary[market]
+        print(f"{market} total/valid/zero rows={stats['total']}/{stats['valid']}/{stats['zero']}")
+
+    kr_valid_rows = summary["KOSPI"]["valid"] + summary["KOSDAQ"]["valid"]
+    print(f"KOSPI+KOSDAQ valid rows={kr_valid_rows}")
+    xkrx_is_open = is_market_open(loader, latest_xkrx_trading_day, "XKRX")
+    if xkrx_is_open and kr_valid_rows < 100:
+        print("status=FAIL_INSUFFICIENT_STOCK_PRICE_ROWS")
+    elif xkrx_is_open and kr_valid_rows < 2000:
+        print("status=WARN_PARTIAL_STOCK_PRICE_COVERAGE")
+    elif any(summary[market]["zero"] > 0 for market in summary):
+        print("status=WARN_OPEN_MARKET_ZERO_VOLUME_ROWS")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_ranking_source_date_quality(loader: SupabaseLoader, today: date):
+    print("\n=== RANKING SOURCE DATE QUALITY ===")
+    latest = _latest(loader, "normalized_market_rankings_daily", "base_date")
+    if not latest:
+        print("status=FAIL_RANKING_EMPTY")
+        return
+
+    normalized_rows = loader.fetch_all("normalized_market_rankings_daily", "base_date", latest, latest)
+    raw_rows = loader.fetch_all("raw_market_rankings", "base_date", latest, latest)
+    raw_map = {
+        (
+            row.get("base_date"),
+            row.get("market"),
+            row.get("rank_type"),
+            normalize_symbol_value(row.get("symbol")),
+        ): row
+        for row in raw_rows
+    }
+
+    stale_kr_rows = 0
+    missing_source_date_rows = 0
+    etp_fallback_rows = 0
+    samples = []
+    for row in normalized_rows:
+        market = _standardize_market_value(row.get("market"))
+        symbol = normalize_symbol_value(row.get("symbol"))
+        source_base_date = str(row.get("source_base_date"))[:10] if row.get("source_base_date") else None
+        raw_row = raw_map.get((row.get("base_date"), row.get("market"), row.get("rank_type"), symbol))
+        raw_payload = {}
+        if raw_row and raw_row.get("raw_data"):
+            try:
+                raw_payload = json.loads(raw_row["raw_data"]) if isinstance(raw_row["raw_data"], str) else raw_row["raw_data"]
+            except Exception:
+                raw_payload = {}
+        raw_price_base_date = raw_payload.get("price_base_date")
+        effective_source_base_date = source_base_date or raw_price_base_date
+        if market in {"KOSPI", "KOSDAQ"}:
+            if row.get("source") == "VALID_PRICE_FALLBACK" and not effective_source_base_date:
+                missing_source_date_rows += 1
+            elif effective_source_base_date and str(row.get("base_date"))[:10] != str(effective_source_base_date)[:10]:
+                stale_kr_rows += 1
+                if len(samples) < 10:
+                    samples.append(
+                        {
+                            "market": market,
+                            "rank_type": row.get("rank_type"),
+                            "symbol": symbol,
+                            "base_date": row.get("base_date"),
+                            "source_base_date": effective_source_base_date,
+                            "source": row.get("source"),
+                        }
+                    )
+        elif market in {"ETF", "ETN"} and effective_source_base_date and str(row.get("base_date"))[:10] != str(effective_source_base_date)[:10]:
+            etp_fallback_rows += 1
+
+    print(f"latest ranking date={latest}")
+    print(f"kr_stale_ranking_rows={stale_kr_rows}")
+    print(f"kr_missing_source_date_rows={missing_source_date_rows}")
+    print(f"etf_etn_fallback_rows={etp_fallback_rows}")
+    print(f"sample_stale_rows={samples}")
+    if missing_source_date_rows > 0:
+        print("status=FAIL_RANKING_SOURCE_DATE_MISSING")
+    elif stale_kr_rows > 0:
+        print("status=WARN_STALE_KR_STOCK_RANKING")
+    else:
+        print("status=SUCCESS")
+
+
+def _print_report_readiness(loader: SupabaseLoader, today: date):
+    print("\n=== REPORT READINESS ===")
+    latest_xkrx_trading_day = get_latest_trading_day_on_or_before(loader, today, "XKRX")
+    if not latest_xkrx_trading_day:
+        print("status=WARN_NO_XKRX_TRADING_DAY")
+        return
+    latest_day_str = latest_xkrx_trading_day.isoformat()
+    rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", latest_day_str, latest_day_str)
+    master_rows = loader.fetch_all("stocks_master", "updated_at", "1900-01-01", "2999-12-31")
+    master_map = {
+        normalize_symbol_value(row.get("symbol")): (_standardize_market_value(row.get("market")), row.get("asset_type"))
+        for row in master_rows
+        if row.get("symbol")
+    }
+    kr_valid_rows = 0
+    for row in rows:
+        master = master_map.get(normalize_symbol_value(row.get("symbol")))
+        if not master:
+            continue
+        market, asset_type = master
+        if market in {"KOSPI", "KOSDAQ"} and asset_type == "STOCK" and is_valid_price_row(row, market_is_open=True):
+            kr_valid_rows += 1
+    print(f"latest_xkrx_trading_day={latest_day_str}")
+    print(f"kr_stock_valid_price_rows={kr_valid_rows}")
+    if is_market_open(loader, latest_xkrx_trading_day, "XKRX") and kr_valid_rows < 100:
+        print("status=FAIL_KR_STOCK_PRICE_COVERAGE")
+        print("note=Do not use same-day KOSPI/KOSDAQ Top rankings for report generation.")
     else:
         print("status=SUCCESS")
 
@@ -1026,7 +1202,10 @@ def verify_data():
     _print_symbol_quality(loader)
     _print_market_ranking_quality(loader)
     _print_market_master_quality(loader)
+    _print_price_coverage_by_market(loader, today)
     _print_ranking_source_quality(loader, today)
+    _print_ranking_source_date_quality(loader, today)
+    _print_report_readiness(loader, today)
     _print_macro_quality(loader, today)
     _print_market_calendar_quality(loader, today)
     _print_market_closed_ingestion_guardrail(loader, today)

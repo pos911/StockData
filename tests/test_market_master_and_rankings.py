@@ -1,11 +1,12 @@
 import asyncio
+import json
 
 import pytest
 
 from src.collectors.kis.base import KISBaseCollector
 from src.collectors.krx_collector import KRXCollector
-from src.jobs.run_daily_master_pipeline import _master_record
-from src.jobs.run_daily_ranking_pipeline import _filter_kis_volume_rows, _persist_rankings
+from src.jobs.run_daily_master_pipeline import _collect_krx_stock_prices, _master_record
+from src.jobs.run_daily_ranking_pipeline import _count_valid_kr_stock_rows, _filter_kis_volume_rows, _persist_rankings
 from src.jobs.run_daily_stock_pipeline import (
     _enforce_detail_universe_guardrail,
     _should_fetch_fundamentals,
@@ -56,6 +57,55 @@ def test_normalize_krx_etn_row():
     assert normalized["symbol"] == "550001"
     assert normalized["market"] == "ETN"
     assert normalized["asset_type"] == "ETN"
+
+
+def test_normalize_krx_stock_price_row():
+    collector = KRXCollector(auth_key="")
+    row = {
+        "BAS_DD": "20260506",
+        "ISU_SRT_CD": "005930",
+        "ISU_ABBRV": "삼성전자",
+        "MKT_ID": "STK",
+        "TDD_OPNPRC": "230,000",
+        "TDD_HGPRC": "233,000",
+        "TDD_LWPRC": "229,000",
+        "TDD_CLSPRC": "232,500",
+        "ACC_TRDVOL": "12,345,678",
+        "ACC_TRDVAL": "2,345,678,900,000",
+        "MKTCAP": "1,200,000,000,000,000",
+        "LIST_SHRS": "5,969,782,550",
+        "FLUC_RT": "1.23",
+    }
+    normalized = collector.normalize_krx_stock_price_row(row, __import__("datetime").date(2026, 5, 6))
+    assert normalized["symbol"] == "005930"
+    assert normalized["market"] == "KOSPI"
+    assert normalized["asset_type"] == "STOCK"
+    assert normalized["close_price"] == 232500.0
+    assert normalized["volume"] == 12345678.0
+
+
+def test_krx_stock_zero_volume_row_is_excluded_from_normalized_prices():
+    class FakeKRX:
+        def fetch_stock_daily_trading(self, _target_date):
+            return [
+                {
+                    "BAS_DD": "20260506",
+                    "ISU_SRT_CD": "005930",
+                    "ISU_ABBRV": "삼성전자",
+                    "MKT_ID": "STK",
+                    "TDD_CLSPRC": "232500",
+                    "ACC_TRDVOL": "0",
+                    "ACC_TRDVAL": "0",
+                }
+            ]
+
+        def normalize_krx_stock_price_row(self, row, target_date):
+            return KRXCollector("").normalize_krx_stock_price_row(row, target_date)
+
+    raw_rows, normalized_rows, stats = _collect_krx_stock_prices(FakeKRX(), __import__("datetime").date(2026, 5, 6))
+    assert len(raw_rows) == 1
+    assert normalized_rows == []
+    assert stats["zero_volume_excluded_rows"] == 1
 
 
 def test_kis_volume_rank_filters_to_approved_market_and_normalizes_symbol():
@@ -110,6 +160,7 @@ class _FakeLoader:
     def __init__(self):
         self.client = _FakeClient()
         self.upserts = []
+        self._source_base_date_supported = True
 
     def upsert_records(self, table, records, **_kwargs):
         self.upserts.append((table, records))
@@ -122,10 +173,24 @@ def test_persist_rankings_deletes_same_source_combo_and_reassigns_rank():
         {"symbol": "005930", "name": "Samsung", "volume": 100, "trading_value": 1000, "market_cap": None, "change_rate": None, "metric_value": 100, "raw_data": {}},
         {"symbol": "000660", "name": "SK hynix", "volume": 90, "trading_value": 900, "market_cap": None, "change_rate": None, "metric_value": 90, "raw_data": {}},
     ]
-    count = _persist_rankings(loader, __import__("datetime").date(2026, 5, 3), "KOSPI", "volume", "KIS", rows)
+    count = _persist_rankings(loader, __import__("datetime").date(2026, 5, 3), "KOSPI", "volume", "KIS", rows, source_base_date="2026-05-03")
     assert count == 2
     normalized = next(records for table, records in loader.upserts if table == "normalized_market_rankings_daily")
     assert [row["rank"] for row in normalized] == [1, 2]
+    assert all(row["source_base_date"] == "2026-05-03" for row in normalized)
+
+
+def test_persist_rankings_gracefully_omits_source_base_date_when_column_missing():
+    loader = _FakeLoader()
+    loader._source_base_date_supported = False
+    rows = [
+        {"symbol": "005930", "name": "Samsung", "volume": 100, "trading_value": 1000, "market_cap": None, "change_rate": None, "metric_value": 100, "raw_data": {}},
+    ]
+    _persist_rankings(loader, __import__("datetime").date(2026, 5, 3), "KOSPI", "volume", "KIS", rows, source_base_date="2026-05-03")
+    normalized = next(records for table, records in loader.upserts if table == "normalized_market_rankings_daily")
+    assert "source_base_date" not in normalized[0]
+    raw = next(records for table, records in loader.upserts if table == "raw_market_rankings")
+    assert json.loads(raw[0]["raw_data"])["source_base_date"] == "2026-05-03"
 
 
 def test_master_record_has_no_rank_field():
@@ -391,3 +456,28 @@ def test_latest_valid_price_date_prefers_latest_valid_not_simple_max():
     )
     result = get_latest_valid_price_date(loader, __import__("datetime").date(2026, 5, 4), lookback_days=5, min_valid_rows=2)
     assert result["selected_price_base_date"] == "2026-04-30"
+
+
+def test_count_valid_kr_stock_rows_uses_strict_validity():
+    loader = _PriceDateLoader(
+        {
+            "stocks_master": [
+                {"symbol": "005930", "market": "KOSPI", "asset_type": "STOCK"},
+                {"symbol": "058470", "market": "KOSDAQ", "asset_type": "STOCK"},
+                {"symbol": "069500", "market": "ETF", "asset_type": "ETF"},
+            ],
+            "normalized_stock_prices_daily": [
+                {"symbol": "005930", "base_date": "2026-05-06", "close_price": 1, "volume": 10, "trading_value": 100},
+                {"symbol": "058470", "base_date": "2026-05-06", "close_price": 2, "volume": 0, "trading_value": 200},
+                {"symbol": "069500", "base_date": "2026-05-06", "close_price": 3, "volume": 10, "trading_value": 300},
+            ],
+        }
+    )
+    master_map = {
+        "005930": {"market": "KOSPI", "asset_type": "STOCK"},
+        "058470": {"market": "KOSDAQ", "asset_type": "STOCK"},
+        "069500": {"market": "ETF", "asset_type": "ETF"},
+    }
+    total, by_market = _count_valid_kr_stock_rows(loader, __import__("datetime").date(2026, 5, 6), master_map)
+    assert total == 1
+    assert by_market == {"KOSPI": 1}

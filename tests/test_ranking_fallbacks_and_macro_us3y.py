@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pytest
 
 from src.jobs import run_daily_macro_pipeline as macro_module
 from src.jobs import run_daily_master_pipeline as master_module
@@ -88,6 +89,7 @@ class _Loader:
         self.client = self
         self.upserts = []
         self.logs = []
+        self._source_base_date_supported = True
 
     def table(self, name):
         return _Query(self.table_map.get(name, []))
@@ -136,8 +138,10 @@ def test_kosdaq_volume_fallback_is_generated_from_valid_price():
     assert source == "VALID_PRICE_FALLBACK"
     assert [row["symbol"] for row in rows] == ["058470"]
     assert rows[0]["raw_data"]["price_base_date"] == "2026-05-03"
+    assert rows[0]["raw_data"]["ranking_base_date"] == "2026-05-04"
     assert rows[0]["raw_data"]["fallback_reason"] == "kis_volume_sparse"
     assert rows[0]["raw_data"]["original_kis_count"] == 0
+    assert rows[0]["raw_data"]["source_base_date"] == "2026-05-03"
 
 
 def test_trading_value_and_market_cap_rankings_use_valid_price_date():
@@ -161,6 +165,7 @@ def test_trading_value_and_market_cap_rankings_use_valid_price_date():
     assert source == "VALID_PRICE_FALLBACK"
     assert price_base_date == "2026-05-03"
     assert rows[0]["raw_data"]["price_base_date"] == "2026-05-03"
+    assert rows[0]["raw_data"]["source_base_date"] == "2026-05-03"
 
     _source2, rows2, price_base_date2 = ranking_module._build_price_based_rankings(
         loader, __import__("datetime").date(2026, 5, 4), master_map, "KOSPI", "market_cap", 30
@@ -196,6 +201,57 @@ def test_etf_rankings_can_use_market_specific_price_fallback_date():
     assert price_base_date == "2026-04-28"
     assert [row["symbol"] for row in rows] == ["069500"]
     assert rows[0]["raw_data"]["price_base_date"] == "2026-04-28"
+
+
+@pytest.mark.asyncio
+async def test_ranking_pipeline_skips_kr_rankings_when_target_date_prices_are_insufficient(monkeypatch):
+    class FakeAuth:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def initialize(self):
+            return None
+
+        async def shutdown(self):
+            return None
+
+    class FakeCollector:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_volume_rank(self, market_code="J", target_code="0000"):
+            assert market_code == "J"
+            return []
+
+    fake_loader = _Loader(
+        {
+            "stocks_master": [
+                {"symbol": "005930", "market": "KOSPI", "asset_type": "STOCK", "name": "Samsung"},
+                {"symbol": "058470", "market": "KOSDAQ", "asset_type": "STOCK", "name": "Leeno"},
+                {"symbol": "069500", "market": "ETF", "asset_type": "ETF", "name": "KODEX 200"},
+            ],
+            "normalized_stock_prices_daily": [
+                {"symbol": "005930", "base_date": "2026-05-06", "close_price": 1, "volume": 10, "trading_value": 100, "market_cap": 10},
+                {"symbol": "069500", "base_date": "2026-05-06", "close_price": 2, "volume": 20, "trading_value": 200, "market_cap": 20},
+            ],
+        }
+    )
+
+    monkeypatch.setattr(ranking_module, "load_config", lambda: {"supabase": {"url": "x", "service_role_key": "y"}, "kis": {}})
+    monkeypatch.setattr(ranking_module, "SupabaseLoader", lambda **_kwargs: fake_loader)
+    monkeypatch.setattr(ranking_module, "KISAuthManager", FakeAuth)
+    monkeypatch.setattr(ranking_module, "KISDomesticStockCollector", FakeCollector)
+    monkeypatch.setattr(ranking_module, "should_skip_market_job", lambda *_args, **_kwargs: (False, "MARKET_OPEN"))
+
+    async def _close_session():
+        return None
+
+    monkeypatch.setattr(ranking_module.KISBaseCollector, "close_session", staticmethod(_close_session))
+    await ranking_module.run_pipeline(__import__("datetime").date(2026, 5, 6), dry_run=False)
+    normalized_records = [records for table, records in fake_loader.upserts if table == "normalized_market_rankings_daily"]
+    flattened = [row for batch in normalized_records for row in batch]
+    assert all(row["market"] not in {"KOSPI", "KOSDAQ"} for row in flattened)
+    assert fake_loader.logs[-1][2] == "SKIPPED_INSUFFICIENT_PRICE_DATA"
 
 
 def test_etp_lookback_uses_recent_krx_data():
@@ -365,3 +421,9 @@ def test_us3y_sql_file_exists():
     with open("sql/add_us3y_to_global_macro.sql", "r", encoding="utf-8") as handle:
         sql = handle.read()
     assert "ADD COLUMN IF NOT EXISTS us3y NUMERIC" in sql
+
+
+def test_ranking_source_base_date_sql_file_exists():
+    with open("sql/add_ranking_source_base_date.sql", "r", encoding="utf-8") as handle:
+        sql = handle.read()
+    assert "ADD COLUMN IF NOT EXISTS source_base_date DATE" in sql
