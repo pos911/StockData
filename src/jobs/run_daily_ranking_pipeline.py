@@ -365,6 +365,13 @@ def _select_volume_rankings(
 ) -> tuple[str, list[dict[str, Any]]]:
     threshold = VOLUME_THRESHOLDS[market]
     limit = RANKING_LIMITS[market]
+    if market in KR_STOCK_MARKETS:
+        if len(kis_rows) < threshold:
+            logger.warning(
+                f"{market} KIS volume ranking is sparse: count={len(kis_rows)}, threshold={threshold}. "
+                "Retaining sparse KIS rows without KR price fallback."
+            )
+        return "KIS", kis_rows[:limit]
     if len(kis_rows) >= threshold:
         return "KIS", kis_rows[:limit]
 
@@ -398,6 +405,19 @@ def _select_volume_rankings(
         )
         return "KIS", kis_rows[:limit]
     return source, rows
+
+
+def _select_kis_trading_value_rows(market: str, kis_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = [row for row in kis_rows if row.get("trading_value") not in (None, "")]
+    rows.sort(
+        key=lambda item: ((item.get("trading_value") or 0), (item.get("volume") or 0)),
+        reverse=True,
+    )
+    if rows:
+        logger.info(f"{market} KIS trading_value candidates={len(rows)}")
+    else:
+        logger.warning(f"{market} KIS trading_value ranking is not available from KIS volume response.")
+    return rows[: RANKING_LIMITS[market]]
 
 
 async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
@@ -494,13 +514,23 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
                 )
 
         for market, limit in RANKING_LIMITS.items():
-            if market in KR_STOCK_MARKETS and not kr_market_ready[market]:
+            if market in KR_STOCK_MARKETS:
+                kis_rows = _select_kis_trading_value_rows(market, classified.get(market, []))
+                if not kis_rows:
+                    if not dry_run:
+                        _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "trading_value")
+                    continue
+                logger.info(f"{market} trading_value ranking source=KIS rows={len(kis_rows)}")
                 if not dry_run:
-                    _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "trading_value")
-                logger.warning(
-                    f"Skipping {market} trading_value ranking because target-date stock prices are insufficient. "
-                    f"valid_rows={kr_market_counts.get(market, 0)} threshold={KR_STOCK_PRICE_READY_THRESHOLDS[market]}"
-                )
+                    _persist_rankings(
+                        loader,
+                        target_date,
+                        market,
+                        "trading_value",
+                        "KIS",
+                        kis_rows,
+                        source_base_date=target_date.strftime("%Y-%m-%d"),
+                    )
                 continue
             source, rows, price_base_date = _build_price_based_rankings(
                 loader, target_date, master_map, market, "trading_value", limit
@@ -530,7 +560,7 @@ async def run_pipeline(target_date: date, dry_run: bool = False) -> None:
                 if not dry_run:
                     _delete_rankings(loader, target_date.strftime("%Y-%m-%d"), market, "market_cap")
                 logger.warning(
-                    f"Skipping {market} market_cap ranking because target-date stock prices are insufficient. "
+                    f"Skipping {market} market_cap ranking because full-market price coverage is insufficient. "
                     f"valid_rows={kr_market_counts.get(market, 0)} threshold={KR_STOCK_PRICE_READY_THRESHOLDS[market]}"
                 )
                 continue

@@ -30,6 +30,36 @@ def _count_valid_stock_rows(loader: SupabaseLoader, target_date: date) -> int:
     )
 
 
+def _count_kis_detail_valid_rows(loader: SupabaseLoader, target_date: date) -> tuple[int, int]:
+    target_date_str = target_date.isoformat()
+    if not hasattr(loader, "client"):
+        return 0, 0
+    raw_rows = (
+        loader.client.table("raw_stock_prices_daily")
+        .select("symbol")
+        .eq("base_date", target_date_str)
+        .eq("source", "KIS_DETAIL")
+        .execute()
+        .data
+        or []
+    )
+    detail_symbols = {row.get("symbol") for row in raw_rows if row.get("symbol")}
+    if not detail_symbols:
+        return 0, 0
+    normalized_rows = loader.fetch_all(
+        "normalized_stock_prices_daily",
+        "base_date",
+        target_date_str,
+        target_date_str,
+    )
+    valid_rows = sum(
+        1
+        for row in normalized_rows
+        if row.get("symbol") in detail_symbols and is_valid_price_row(row, market_is_open=True)
+    )
+    return len(detail_symbols), valid_rows
+
+
 def run_feature_pipeline(target_date: date) -> tuple[str, int]:
     logger.info(f"Starting Feature Pipeline wrapper for {target_date}...")
     config = load_config()
@@ -37,14 +67,20 @@ def run_feature_pipeline(target_date: date) -> tuple[str, int]:
 
     xkrx_open = is_market_open(loader, target_date, "XKRX")
     valid_rows = _count_valid_stock_rows(loader, target_date)
-    logger.info(f"feature_pipeline_target_date={target_date} xkrx_is_open={xkrx_open} valid_stock_rows={valid_rows}")
+    detail_universe_count, detail_valid_rows = _count_kis_detail_valid_rows(loader, target_date)
+    logger.info(
+        f"feature_pipeline_target_date={target_date} xkrx_is_open={xkrx_open} "
+        f"valid_stock_rows={valid_rows} detail_universe_count={detail_universe_count} detail_valid_rows={detail_valid_rows}"
+    )
 
-    if xkrx_open and valid_rows < 100:
+    minimum_required = max(10, detail_universe_count // 5) if detail_universe_count else 100
+    effective_valid_rows = detail_valid_rows if detail_universe_count else valid_rows
+    if xkrx_open and effective_valid_rows < minimum_required:
         previous_trading_day = get_previous_trading_day(loader, target_date, "XKRX")
         previous_valid_rows = _count_valid_stock_rows(loader, previous_trading_day) if previous_trading_day else 0
         logger.warning(
             f"Insufficient valid stock rows for feature generation on {target_date}: "
-            f"valid_rows={valid_rows}, previous_trading_day={previous_trading_day}, "
+            f"valid_rows={effective_valid_rows}, minimum_required={minimum_required}, previous_trading_day={previous_trading_day}, "
             f"previous_valid_rows={previous_valid_rows}"
         )
         loader.insert_log(
@@ -53,7 +89,7 @@ def run_feature_pipeline(target_date: date) -> tuple[str, int]:
             "SKIPPED_INSUFFICIENT_PRICE_DATA",
             0,
             (
-                f"target_valid_rows={valid_rows}; previous_trading_day={previous_trading_day}; "
+                f"target_valid_rows={effective_valid_rows}; minimum_required={minimum_required}; previous_trading_day={previous_trading_day}; "
                 f"previous_valid_rows={previous_valid_rows}"
             ),
         )

@@ -61,12 +61,12 @@ jobs:
           API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
         run: |
           echo "schedule_scope=daily_market_pipeline"
-          echo "pipeline_order=daily_master_sync -> daily_ranking_sync -> daily_stock_detail_sync -> verify"
+          echo "pipeline_order=daily_master_sync -> daily_ranking_sync -> daily_kis_universe_detail_sync -> feature -> verify"
           mkdir -p config
           echo "$API_KEYS_JSON" > config/api_keys.json
           export PYTHONPATH=.
           python src/jobs/run_daily_master_pipeline.py
           python src/jobs/run_daily_ranking_pipeline.py
-          python src/jobs/run_daily_stock_pipeline.py
+          python -m src.jobs.run_daily_kis_universe_pipeline --limit 100
           python src/jobs/run_daily_feature_pipeline.py
           python scripts/verify_data.py

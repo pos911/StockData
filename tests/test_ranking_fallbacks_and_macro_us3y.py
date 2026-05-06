@@ -110,38 +110,28 @@ class _Loader:
         ]
 
 
-def test_kosdaq_volume_fallback_is_generated_from_valid_price():
-    stock_rows = [{"symbol": f"{i:06d}", "market": "KOSPI", "asset_type": "STOCK", "name": f"Name{i}"} for i in range(100000, 100099)]
-    price_rows = [{"symbol": f"{i:06d}", "base_date": "2026-05-03", "close_price": 1, "volume": 10, "trading_value": 100, "market_cap": 10} for i in range(100000, 100099)]
-    loader = _Loader(
-        {
-            "stocks_master": stock_rows + [
-                {"symbol": "005930", "market": "KOSPI", "asset_type": "STOCK", "name": "Samsung"},
-                {"symbol": "058470", "market": "KOSDAQ", "asset_type": "STOCK", "name": "Leeno"},
-                {"symbol": "069500", "market": "ETF", "asset_type": "ETF", "name": "KODEX 200"},
-            ],
-            "normalized_stock_prices_daily": price_rows + [
-                {"symbol": "005930", "base_date": "2026-05-03", "close_price": 1, "volume": 100, "trading_value": 1000, "market_cap": 10},
-                {"symbol": "058470", "base_date": "2026-05-03", "close_price": 2, "volume": 200, "trading_value": 3000, "market_cap": 20},
-                {"symbol": "069500", "base_date": "2026-05-03", "close_price": 3, "volume": 150, "trading_value": 2500, "market_cap": 30},
-            ],
-        }
-    )
-    master_map = ranking_module._load_master_map(loader)
+def test_kr_stock_volume_ranking_retains_sparse_kis_rows_without_price_fallback():
+    loader = _Loader({"stocks_master": [], "normalized_stock_prices_daily": []})
     source, rows = ranking_module._select_volume_rankings(
         loader=loader,
         target_date=__import__("datetime").date(2026, 5, 4),
         market="KOSDAQ",
-        kis_rows=[],
-        master_map=master_map,
+        kis_rows=[
+            {
+                "symbol": "058470",
+                "name": "Leeno",
+                "volume": 200,
+                "trading_value": 3000,
+                "market_cap": None,
+                "change_rate": None,
+                "metric_value": 200,
+                "raw_data": {"response_row": {"mksc_shrn_iscd": "058470"}},
+            }
+        ],
+        master_map={},
     )
-    assert source == "VALID_PRICE_FALLBACK"
+    assert source == "KIS"
     assert [row["symbol"] for row in rows] == ["058470"]
-    assert rows[0]["raw_data"]["price_base_date"] == "2026-05-03"
-    assert rows[0]["raw_data"]["ranking_base_date"] == "2026-05-04"
-    assert rows[0]["raw_data"]["fallback_reason"] == "kis_volume_sparse"
-    assert rows[0]["raw_data"]["original_kis_count"] == 0
-    assert rows[0]["raw_data"]["source_base_date"] == "2026-05-03"
 
 
 def test_trading_value_and_market_cap_rankings_use_valid_price_date():

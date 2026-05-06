@@ -650,7 +650,7 @@ def _count_active_master_symbols(loader: SupabaseLoader) -> int:
 
 
 def _detail_universe_source_counts(universe: list[dict]) -> dict[str, int]:
-    counts = {"static": 0, "manual": 0, "ranking": 0}
+    counts = {"static": 0, "manual": 0, "ranking": 0, "kis_volume_rank": 0, "report_rank": 0}
     for stock in universe:
         source_text = str(stock.get("source_category") or "")
         parts = {part.strip() for part in source_text.split(",") if part.strip()}
@@ -672,7 +672,7 @@ def _enforce_detail_universe_guardrail(
     counts = _detail_universe_source_counts(universe)
     logger.error(
         "Detail universe exceeded guardrail; truncating to safe size. "
-        f"static_count={counts['static']}, ranking_count={counts['ranking']}, "
+        f"static_count={counts['static']}, ranking_count={counts['ranking'] + counts['kis_volume_rank'] + counts['report_rank']}, "
         f"active_master_count={active_master_count}, final_universe_count={len(universe)}"
     )
 
@@ -681,9 +681,13 @@ def _enforce_detail_universe_guardrail(
         parts = {part.strip() for part in source_text.split(",") if part.strip()}
         if "static" in parts or "manual" in parts:
             return (0, stock.get("symbol", ""))
-        if "ranking" in parts:
+        if "kis_volume_rank" in parts:
             return (1, stock.get("symbol", ""))
-        return (2, stock.get("symbol", ""))
+        if "report_rank" in parts or "ranking" in parts:
+            return (2, stock.get("symbol", ""))
+        if "ranking" in parts:
+            return (2, stock.get("symbol", ""))
+        return (3, stock.get("symbol", ""))
 
     return sorted(universe, key=_priority)[:max_universe_size]
 
@@ -952,7 +956,7 @@ async def run_pipeline(target_date: date, limit: int = None, dry_run: bool = Fal
         dry_run=dry_run,
     )
 
-    universe = await universe_loader.get_combined_universe(auto_backfill=limit is None)
+    universe = await universe_loader.get_kis_detail_universe(requested_limit=limit)
     active_master_count = _count_active_master_symbols(loader)
     market_classification_map = krx_collector.fetch_market_classification_map()
     opendart_collector = OpenDartCollector(api_key=config.get("opendart", {}).get("api_key", ""))

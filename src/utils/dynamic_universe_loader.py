@@ -12,6 +12,8 @@ from src.utils.symbols import normalize_symbol_value
 from src.utils.time_utils import get_current_kst
 
 logger = get_logger(__name__)
+DEFAULT_UNIVERSE_LIMIT = 300
+HARD_UNIVERSE_LIMIT = 500
 
 
 def _standardize_market(market: str | None) -> str | None:
@@ -262,6 +264,107 @@ class DynamicUniverseLoader:
             )
         return ranked
 
+    async def _load_live_kis_volume_rank_universe(self, master_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
+        if not self.collector:
+            return []
+        try:
+            ranking_rows = await self.collector.fetch_volume_rank(market_code="J")
+        except Exception as exc:
+            logger.warning(f"Failed to fetch live KIS volume ranking universe: {exc}")
+            return []
+
+        ranked: List[Dict[str, str]] = []
+        for row in ranking_rows or []:
+            symbol = normalize_symbol_value(row.get("mksc_shrn_iscd") or row.get("symbol") or row.get("code"))
+            master_row = master_map.get(symbol)
+            if not symbol or not master_row:
+                continue
+            market = _standardize_market(master_row.get("market"))
+            asset_type = master_row.get("asset_type")
+            if market in {"KOSPI", "KOSDAQ"} and asset_type != "STOCK":
+                continue
+            if market == "ETF" and asset_type != "ETF":
+                continue
+            if market == "ETN" and asset_type != "ETN":
+                continue
+            ranked.append(
+                {
+                    "code": symbol,
+                    "name": master_row.get("name") or row.get("hts_kor_isnm") or symbol,
+                    "market": market,
+                    "source_category": "kis_volume_rank",
+                }
+            )
+        return ranked
+
+    def _load_latest_kis_ranking_universe(self, master_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
+        try:
+            latest_res = (
+                self.loader.client.table("normalized_market_rankings_daily")
+                .select("base_date")
+                .eq("source", "KIS")
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if not latest_res.data:
+                return []
+            latest_date = latest_res.data[0]["base_date"]
+            ranking_rows = (
+                self.loader.client.table("normalized_market_rankings_daily")
+                .select("symbol, name, market, source")
+                .eq("base_date", latest_date)
+                .eq("source", "KIS")
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to load latest KIS ranking rows: {exc}")
+            return []
+
+        ranked: List[Dict[str, str]] = []
+        for row in ranking_rows:
+            symbol = normalize_symbol_value(row.get("symbol"))
+            master_row = master_map.get(symbol)
+            if not symbol or not master_row:
+                continue
+            ranked.append(
+                {
+                    "code": symbol,
+                    "name": master_row.get("name") or row.get("name") or symbol,
+                    "market": _standardize_market(master_row.get("market")) or _standardize_market(row.get("market")),
+                    "source_category": "report_rank",
+                }
+            )
+        return ranked
+
+    @staticmethod
+    def _prioritize_universe(symbol_rows: List[Dict[str, Any]], requested_limit: int | None) -> List[Dict[str, Any]]:
+        max_limit = requested_limit or DEFAULT_UNIVERSE_LIMIT
+        max_limit = min(max_limit, HARD_UNIVERSE_LIMIT)
+
+        def _priority(stock: Dict[str, Any]) -> tuple[int, str]:
+            parts = {part.strip() for part in str(stock.get("source_category") or "").split(",") if part.strip()}
+            if "static" in parts:
+                return (0, stock.get("symbol", ""))
+            if "manual" in parts:
+                return (1, stock.get("symbol", ""))
+            if "watchlist" in parts:
+                return (2, stock.get("symbol", ""))
+            if "kis_volume_rank" in parts:
+                return (3, stock.get("symbol", ""))
+            if "report_rank" in parts or "ranking" in parts:
+                return (4, stock.get("symbol", ""))
+            return (5, stock.get("symbol", ""))
+
+        if len(symbol_rows) > HARD_UNIVERSE_LIMIT:
+            logger.warning(
+                f"KIS detail universe exceeded hard limit; truncating from {len(symbol_rows)} to {HARD_UNIVERSE_LIMIT}"
+            )
+        ordered = sorted(symbol_rows, key=_priority)
+        return ordered[:max_limit]
+
     async def get_combined_universe(self, auto_backfill: bool = True) -> List[Dict[str, Any]]:
         del auto_backfill
         logger.info("Loading combined universe from static universe and ranking table.")
@@ -304,6 +407,60 @@ class DynamicUniverseLoader:
         ]
         logger.info(f"Combined universe loaded: {len(final_universe)} symbols")
         return final_universe
+
+    async def get_kis_detail_universe(
+        self,
+        requested_limit: int | None = None,
+        include_live_kis_volume: bool = True,
+    ) -> List[Dict[str, Any]]:
+        logger.info("Loading KIS detail universe from static/manual sources and KIS/report rankings.")
+        master_map = self._load_master_symbol_map()
+        static_rows = self._load_static_universe()
+        report_rows = self._load_latest_kis_ranking_universe(master_map)
+        legacy_ranked_rows = self._load_latest_ranked_universe(master_map)
+        kis_volume_rows = await self._load_live_kis_volume_rank_universe(master_map) if include_live_kis_volume else []
+
+        combined: Dict[str, Dict[str, Any]] = {}
+        for category, rows in (
+            ("static", static_rows),
+            ("kis_volume_rank", kis_volume_rows),
+            ("report_rank", report_rows),
+            ("ranking", legacy_ranked_rows),
+        ):
+            for row in rows:
+                symbol = normalize_symbol_value(row.get("code"))
+                if not symbol:
+                    continue
+                source_category = row.get("source_category") or category
+                existing = combined.setdefault(
+                    symbol,
+                    {
+                        "symbol": symbol,
+                        "name": row.get("name") or symbol,
+                        "market": _standardize_market(row.get("market")),
+                        "sources": set(),
+                    },
+                )
+                existing["name"] = existing.get("name") or row.get("name") or symbol
+                if not existing.get("market"):
+                    existing["market"] = _standardize_market(row.get("market"))
+                existing["sources"].add(source_category)
+
+        final_universe = [
+            {
+                "symbol": symbol,
+                "name": payload["name"],
+                "market": payload["market"],
+                "source_category": ",".join(sorted(payload["sources"])),
+            }
+            for symbol, payload in combined.items()
+        ]
+        prioritized = self._prioritize_universe(final_universe, requested_limit)
+        logger.info(
+            "KIS detail universe loaded: "
+            f"combined={len(final_universe)}, final={len(prioritized)}, requested_limit={requested_limit or DEFAULT_UNIVERSE_LIMIT}"
+        )
+        return prioritized
 
     def fetch_full_universe(self, target_date=None) -> List[Dict[str, Any]]:
         min_count = int(self.config.get("pipeline", {}).get("full_universe_min_count", 2000))

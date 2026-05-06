@@ -15,7 +15,7 @@ _Last updated: 2026-05-06_
 | 원천 | 주요 역할 | 비고 |
 |---|---|---|
 | KRX | 한국시장 종목 마스터, ETF/ETN 일별매매정보, ETP 가격·거래량·거래대금 | 한국시장 공식 기준 원천 |
-| KIS Open API | 국내 주식 수급, 공매도, 스냅샷, 일부 실시간성 거래량 참고 | 거래량 ranking은 production path에서 `J` 전체시장만 사용 |
+| KIS Open API | 국내 주식 수급, 공매도, 스냅샷, 일부 실시간성 거래량 참고 | 거래량 ranking은 production path에서 `J` 전체시장만 사용. 전종목 가격 원천으로 무제한 loop 금지 |
 | FRED | 미국 금리 등 글로벌 매크로 시계열 | `DGS3`는 미국 3년물, `DGS10`은 미국 10년물 |
 | ECOS | 한국 금리·환율 등 국내 매크로 | 한국 10년물 등 |
 | yfinance 또는 외부 시세 | 글로벌 지수·상품·변동성 지표 보조 | S&P500, Nasdaq, VIX, DXY 등 |
@@ -29,10 +29,14 @@ _Last updated: 2026-05-06_
 5. KOSPI 전종목 일별가격은 KRX `stk_bydd_trd` 일별매매정보를 우선 사용한다.
 6. KOSDAQ 전종목 일별가격은 공식 endpoint 명세 확인 전까지 `NOT_IMPLEMENTED` 상태로 관리한다.
 7. 거래대금·시가총액 랭킹은 `normalized_stock_prices_daily + stocks_master` 기준으로 만든다.
-8. `Q530134` 같은 Q-prefix 심볼은 저장하지 않는다. 항상 canonical 6자리 심볼로 정규화한다.
-9. 최신 가격 기준일은 단순 `max(base_date)`가 아니라 `close_price`, `volume`, `trading_value`가 유효한 최신일을 사용한다.
-10. `available_at`은 데이터가 리포트·소비자에게 사용 가능해지는 시각이다.
-11. 신규 스키마 변경은 SQL 파일로 남기고 Supabase SQL Editor에서 수동 실행한다.
+8. KRX full-market price는 best-effort다. 실패하더라도 KIS universe 상세 적재 경로는 독립적으로 동작해야 한다.
+9. `KIS_DETAIL`은 전종목 원천이 아니라 운영 universe 상세 원천이다. 관심종목/랭킹 후보 상세 보강에만 사용한다.
+10. KIS universe 기반 데이터는 시장 전체 통계로 해석하면 안 된다.
+11. KIS 개별 API를 전종목 2,000개 이상 무제한 loop 하는 것은 금지한다.
+12. `Q530134` 같은 Q-prefix 심볼은 저장하지 않는다. 항상 canonical 6자리 심볼로 정규화한다.
+13. 최신 가격 기준일은 단순 `max(base_date)`가 아니라 `close_price`, `volume`, `trading_value`가 유효한 최신일을 사용한다.
+14. `available_at`은 데이터가 리포트·소비자에게 사용 가능해지는 시각이다.
+15. 신규 스키마 변경은 SQL 파일로 남기고 Supabase SQL Editor에서 수동 실행한다.
 
 ---
 
@@ -59,17 +63,46 @@ _Last updated: 2026-05-06_
 
 4. run_daily_macro_pipeline.py
    - FRED/ECOS/외부지표 기반 macro 데이터 수집
+
+5. run_daily_kis_universe_pipeline.py
+   - static/manual 관심종목 + KIS volume ranking + 최신 KIS ranking 종목을 합친 운영 universe 상세 적재
+   - KIS 가격, 시총, 상장주식수, PER/PBR, 외국인 보유율 보강
+   - `normalized_stock_prices_daily`, `normalized_stock_snapshots_daily`, `normalized_stock_fundamentals_ratios`에 `KIS_DETAIL` 기준 적재
 ```
 
 ### 2.2 상세 수집 제한
 
-`run_daily_stock_pipeline.py`는 전체 종목을 대상으로 상세 호출하지 않는다. 기본 상세 universe는 다음으로 구성한다.
+`run_daily_kis_universe_pipeline.py`와 `run_daily_stock_pipeline.py`는 전체 종목을 대상으로 상세 호출하지 않는다. 기본 상세 universe는 다음으로 구성한다.
 
 - `static_stock_universe.enabled=true`
-- 최신 `normalized_market_rankings_daily` 종목
+- live KIS `volume-rank` 종목
+- 최신 `normalized_market_rankings_daily`의 `source='KIS'` 종목
 - 필요 시 제한된 수의 보강 대상
 
+기본 limit은 300, hard limit은 500이다.
+
+### 2.4 KIS_DETAIL 사용 원칙
+
+- KIS `inquire-price`는 현재가·시총·상장주식수·PER/PBR·외국인보유율 보강에 사용한다.
+- KIS `inquire-daily-itemchartprice`는 운영 universe 일봉 가격 보강에 사용한다.
+- KIS `volume-rank`는 시장 전체 거래량 대표 종목 후보를 잡는 용도다.
+- KIS_DETAIL universe로 계산한 값은 “KOSPI/KOSDAQ 시장 전체 거래대금 Top/시총 Top”으로 표현하면 안 된다.
+- report는 다음을 구분해야 한다.
+  - `KIS volume top`
+  - `watchlist_signal`
+  - `KR full-market trading_value top`
+  - `KR full-market market_cap top`
+
 `stocks_master.is_active=true` 전체를 상세 수집 대상으로 확장하지 않는다.
+
+### 2.3 미확정 명세
+
+- KOSDAQ 전종목 일별매매정보는 아직 공식 KRX API 명세 확인이 필요하다.
+- 필요한 문서:
+  - 코스닥 일별매매정보 endpoint
+  - request field
+  - response OutBlock 필드
+- 명세 확인 전에는 KOSDAQ full price coverage를 `NOT_IMPLEMENTED`로 유지한다.
 
 ---
 

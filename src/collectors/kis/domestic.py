@@ -182,6 +182,7 @@ class KISDomesticStockCollector(KISBaseCollector):
         start_date: str = "",
         end_date: str = "",
         available_at: Optional[str] = None,
+        source_label: str = "KIS",
     ):
         symbol = normalize_symbol_value(symbol)
         mapping = KIS_MAPPING["ohlcv"]
@@ -225,13 +226,13 @@ class KISDomesticStockCollector(KISBaseCollector):
                 "trading_value": _parse_int_nullable(row.get("acml_tr_pbmn")),
                 "market_cap": market_cap,
                 "outstanding_shares": listed_shares,
-                "source": "KIS",
+                "source": source_label,
                 "available_at": available_at or datetime.now().isoformat(),
             }
             records.append(record)
             raw_records.append(
                 {
-                    "source": "KIS",
+                    "source": source_label,
                     "symbol": symbol,
                     "base_date": record["base_date"],
                     "raw_data": json.dumps(
@@ -497,7 +498,13 @@ class KISDomesticStockCollector(KISBaseCollector):
         data = await self._request("GET", "/uapi/domestic-stock/v1/quotations/market-cap", "FHPST01740000", params=params)
         return data.get("output", []) if data else []
 
-    async def fetch_fundamental_info(self, symbol: str, base_date: str, available_at: Optional[str] = None) -> dict:
+    async def fetch_fundamental_info(
+        self,
+        symbol: str,
+        base_date: str,
+        available_at: Optional[str] = None,
+        source_label: str = "KIS",
+    ) -> dict:
         symbol = normalize_symbol_value(symbol)
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
@@ -518,10 +525,111 @@ class KISDomesticStockCollector(KISBaseCollector):
             "w52_low": _parse_int(output.get("w52_lwpr", 0)),
             "listed_shares": _parse_int(output.get("lstn_stcn", 0)),
             "foreign_holding_ratio": _parse_float(output.get("hts_frgn_ehrt", 0)),
-            "source": "KIS",
+            "source": source_label,
             "available_at": available_at or datetime.now().isoformat(),
         }
         logger.debug(
             f"[fetch_fundamental_info] {symbol}: market_cap={record['market_cap']:,}, per={record['per']}, pbr={record['pbr']}"
         )
         return record
+
+    async def fetch_kis_price_snapshot(
+        self,
+        symbol: str,
+        base_date: str,
+        available_at: Optional[str] = None,
+        source_label: str = "KIS_DETAIL",
+    ) -> dict:
+        return await self.fetch_fundamental_info(
+            symbol,
+            base_date=base_date,
+            available_at=available_at,
+            source_label=source_label,
+        )
+
+    async def fetch_kis_daily_price(
+        self,
+        symbol: str,
+        target_date: date | str,
+        available_at: Optional[str] = None,
+        source_label: str = "KIS_DETAIL",
+    ) -> dict:
+        target_ymd = target_date.strftime("%Y%m%d") if hasattr(target_date, "strftime") else str(target_date).replace("-", "")
+        rows = await self.fetch_ohlcv(
+            symbol,
+            timeframe="D",
+            start_date=target_ymd,
+            end_date=target_ymd,
+            available_at=available_at,
+            source_label=source_label,
+        )
+        return rows[0] if rows else {}
+
+    async def fetch_kis_stock_basic_info(self, symbol: str) -> dict:
+        symbol = normalize_symbol_value(symbol)
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+        }
+        data = await self._request("GET", "/uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100", params=params)
+        if not data or "output" not in data:
+            return {}
+        output = data["output"]
+        return {
+            "symbol": symbol,
+            "name": output.get("hts_kor_isnm") or output.get("bstp_kor_isnm"),
+            "market_cap": _parse_int_nullable(output.get("hts_avls")),
+            "outstanding_shares": _parse_int_nullable(output.get("lstn_stcn")),
+            "foreign_holding_ratio": _parse_float_nullable(output.get("hts_frgn_ehrt")),
+            "per": _parse_float_nullable(output.get("per")),
+            "pbr": _parse_float_nullable(output.get("pbr")),
+        }
+
+    async def fetch_kis_market_cap_info(self, symbol: str) -> dict:
+        info = await self.fetch_kis_stock_basic_info(symbol)
+        if not info:
+            return {}
+        market_cap = info.get("market_cap")
+        return {
+            "symbol": info.get("symbol"),
+            "market_cap": market_cap * 100_000_000 if market_cap is not None else None,
+            "outstanding_shares": info.get("outstanding_shares"),
+        }
+
+    async def fetch_kis_investment_ratios(
+        self,
+        symbol: str,
+        base_date: str,
+        available_at: Optional[str] = None,
+        source_label: str = "KIS_DETAIL",
+    ) -> dict:
+        symbol = normalize_symbol_value(symbol)
+        basic = await self.fetch_kis_stock_basic_info(symbol)
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": symbol,
+            "fid_div_cls_code": "0",
+        }
+        data = await self._request(
+            "GET",
+            KIS_MAPPING["stability_ratio"]["path"],
+            KIS_MAPPING["stability_ratio"]["tr_id"],
+            params=params,
+        )
+        row = {}
+        if data and "output" in data:
+            output = data["output"]
+            if isinstance(output, list) and output:
+                row = output[0]
+            elif isinstance(output, dict):
+                row = output
+        return {
+            "symbol": symbol,
+            "base_date": base_date,
+            "per": basic.get("per"),
+            "pbr": basic.get("pbr"),
+            "roe": _parse_float_nullable(row.get("self_cptl_ntin_inrt")),
+            "debt_ratio": _parse_float_nullable(row.get("lblt_rate")),
+            "source": source_label,
+            "available_at": available_at or datetime.now().isoformat(),
+        }

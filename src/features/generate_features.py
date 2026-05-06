@@ -410,14 +410,43 @@ class FeatureGenerator:
 
     def _load_universe(self):
         try:
-            res = self.loader.client.table("stocks_master").select("symbol, name").eq("is_active", True).execute()
-            if res.data:
-                for row in res.data:
-                    row["symbol"] = normalize_symbol_value(row.get("symbol"))
-                return res.data
-            else:
-                logger.warning("No active stocks found in stocks_master.")
-                return []
+            static_rows = (
+                self.loader.client.table("static_stock_universe")
+                .select("symbol, name")
+                .eq("enabled", True)
+                .execute()
+                .data
+                or []
+            )
+            latest_rank_res = (
+                self.loader.client.table("normalized_market_rankings_daily")
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            latest_rank_date = (latest_rank_res.data or [{}])[0].get("base_date")
+            ranking_rows = []
+            if latest_rank_date:
+                ranking_rows = (
+                    self.loader.client.table("normalized_market_rankings_daily")
+                    .select("symbol, name")
+                    .eq("base_date", latest_rank_date)
+                    .eq("source", "KIS")
+                    .execute()
+                    .data
+                    or []
+                )
+            combined = {}
+            for row in static_rows + ranking_rows:
+                symbol = normalize_symbol_value(row.get("symbol"))
+                if not symbol:
+                    continue
+                combined[symbol] = {"symbol": symbol, "name": row.get("name") or symbol}
+            if combined:
+                return list(combined.values())
+            logger.warning("No KIS detail universe symbols found in static_stock_universe or latest KIS ranking rows.")
+            return []
         except Exception as e:
             logger.error(f"Error loading universe from DB: {e}")
             return []
