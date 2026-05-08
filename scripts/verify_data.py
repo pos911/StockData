@@ -1272,17 +1272,61 @@ def _print_feature_without_valid_price(loader: SupabaseLoader, today: date):
     print("\n=== FEATURE WITHOUT VALID PRICE ===")
     target_date = today.isoformat()
     feature_rows = loader.fetch_all("feature_store_daily", "base_date", target_date, target_date)
-    valid_price_rows = [
-        row for row in loader.fetch_all("normalized_stock_prices_daily", "base_date", target_date, target_date)
-        if is_valid_price_row(row, market_is_open=True)
-    ]
+    global_feature_rows = [row for row in feature_rows if row.get("symbol") == "GLOBAL"]
+    stock_feature_rows = [row for row in feature_rows if row.get("symbol") and row.get("symbol") != "GLOBAL"]
+    stock_feature_symbols = sorted(
+        {
+            normalize_symbol_value(row.get("symbol"))
+            for row in stock_feature_rows
+            if normalize_symbol_value(row.get("symbol"))
+        }
+    )
+    kis_detail_symbols: set[str] = set()
+    if hasattr(loader, "client"):
+        try:
+            raw_rows = (
+                loader.client.table("raw_stock_prices_daily")
+                .select("symbol")
+                .eq("base_date", target_date)
+                .eq("source", "KIS_DETAIL")
+                .execute()
+                .data
+                or []
+            )
+            kis_detail_symbols = {
+                normalize_symbol_value(row.get("symbol"))
+                for row in raw_rows
+                if normalize_symbol_value(row.get("symbol"))
+            }
+        except Exception as exc:
+            print(f"kis_detail_symbol_lookup=ERROR note={exc}")
+
+    kis_detail_valid_price_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in loader.fetch_all("normalized_stock_prices_daily", "base_date", target_date, target_date)
+        if normalize_symbol_value(row.get("symbol"))
+        and is_valid_price_row(row, market_is_open=True)
+        and (
+            not kis_detail_symbols
+            or normalize_symbol_value(row.get("symbol")) in kis_detail_symbols
+        )
+    }
+    feature_symbols_without_valid_price = sorted(
+        symbol for symbol in stock_feature_symbols if symbol not in kis_detail_valid_price_symbols
+    )
     print(f"target_date={target_date}")
-    print(f"feature_row_count={len(feature_rows)}")
-    print(f"valid_price_row_count={len(valid_price_rows)}")
-    if feature_rows and len(valid_price_rows) < 100:
-        print("status=WARN_FEATURE_WITHOUT_VALID_PRICE")
-    else:
+    print(f"feature_total_rows={len(feature_rows)}")
+    print(f"global_feature_rows={len(global_feature_rows)}")
+    print(f"stock_feature_rows={len(stock_feature_rows)}")
+    print(f"kis_detail_valid_price_rows={len(kis_detail_valid_price_symbols)}")
+    print(f"stock_feature_symbols={len(stock_feature_symbols)}")
+    print(f"feature_symbols_without_valid_price={feature_symbols_without_valid_price}")
+    if not stock_feature_symbols or not feature_symbols_without_valid_price:
         print("status=SUCCESS")
+    elif len(feature_symbols_without_valid_price) < len(stock_feature_symbols):
+        print("status=WARN_FEATURE_PARTIAL_PRICE_MATCH")
+    else:
+        print("status=WARN_FEATURE_WITHOUT_VALID_PRICE")
 
 
 def _print_stock_detail_universe_quality(config: dict, loader: SupabaseLoader):

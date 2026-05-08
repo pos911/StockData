@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import date, timedelta
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
@@ -97,7 +102,10 @@ def run_feature_pipeline(target_date: date) -> tuple[str, int]:
 
     from src.features.generate_features import run_job as generate_features_job
 
-    processed = generate_features_job(target_date)
+    processed_raw = generate_features_job(target_date)
+    if processed_raw is None:
+        logger.warning("generate_features.run_job returned None; coercing processed count to 0.")
+    processed = int(processed_raw or 0)
     status = "SUCCESS" if processed > 0 else "WARN"
     logger.info(f"Feature Pipeline wrapper finished. status={status}, processed={processed}")
     return status, processed

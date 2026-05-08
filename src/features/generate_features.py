@@ -451,16 +451,17 @@ class FeatureGenerator:
             logger.error(f"Error loading universe from DB: {e}")
             return []
 
-def run_job(target_date: date):
+def run_job(target_date: date) -> int:
     logger.info(f"Starting Real Feature Engineering Job for {target_date}...")
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     
     generator = FeatureGenerator(loader)
-    processed = generator.generate_features_for_date(target_date)
+    processed = int(generator.generate_features_for_date(target_date) or 0)
     status = "SUCCESS" if processed > 0 else "WARN"
     loader.insert_log("daily_feature_generator", target_date.strftime("%Y-%m-%d"), status, processed)
     logger.info(f"Feature Engineering Finished. status={status}, processed={processed}")
+    return processed
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
