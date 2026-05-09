@@ -38,6 +38,91 @@ class FeatureGenerator:
             deduped[key] = record
         return list(deduped.values())
 
+    def _feature_quality_columns_available(self) -> tuple[bool, bool]:
+        cached = getattr(self, "_feature_quality_columns_cache", None)
+        if cached is not None:
+            return cached
+        available = (False, False)
+        try:
+            self.loader.client.table("feature_store_daily").select(
+                "data_quality_flag,source_consistency_status"
+            ).limit(1).execute()
+            available = (True, True)
+        except Exception as exc:
+            logger.warning(
+                "feature_store_daily quality columns are unavailable. "
+                f"Run sql/add_feature_data_quality_flags.sql to persist source-quality flags. note={exc}"
+            )
+        self._feature_quality_columns_cache = available
+        return available
+
+    @staticmethod
+    def _window_source_status(group: pd.DataFrame, target_base_date: str, periods: int) -> Dict[str, Any]:
+        window = group[group["base_date"] <= target_base_date].tail(periods + 1)
+        if len(window) < periods + 1:
+            return {"ready": False, "source_mixed": False, "sources": {}}
+        sources = [str(value or "UNKNOWN") for value in window["source"].tolist()]
+        counts = pd.Series(sources).value_counts().to_dict()
+        return {"ready": True, "source_mixed": len(counts) > 1, "sources": counts}
+
+    @staticmethod
+    def _detect_price_scale_warnings(symbol: str, group: pd.DataFrame, target_base_date: str) -> list[str]:
+        warnings: list[str] = []
+        last_row = group[group["base_date"] == target_base_date]
+        if last_row.empty:
+            return warnings
+        latest_close = float(last_row.iloc[0].get("close_price") or 0)
+        bounds = {
+            "005930": (50_000, 500_000),
+            "000660": (200_000, 3_000_000),
+            "071050": (50_000, 500_000),
+            "278470": (100_000, 1_000_000),
+            "058470": (50_000, 500_000),
+        }
+        if symbol in bounds:
+            low, high = bounds[symbol]
+            if latest_close and not (low <= latest_close <= high):
+                warnings.append("WARN_PRICE_SCALE_ANOMALY")
+
+        trailing = (
+            group[group["base_date"] < target_base_date]["close_price"]
+            .dropna()
+            .astype(float)
+            .tail(20)
+            .tolist()
+        )
+        if len(trailing) >= 5:
+            baseline = float(np.median(trailing))
+            if baseline > 0:
+                ratio = latest_close / baseline
+                if ratio >= 1.8 or ratio <= 0.55:
+                    warnings.append("WARN_PRICE_JUMP_ANOMALY")
+        return sorted(set(warnings))
+
+    @staticmethod
+    def _build_feature_record(
+        symbol: str,
+        base_date: str,
+        feature_name: str,
+        feature_value: Any,
+        available_at: str,
+        include_quality_columns: tuple[bool, bool],
+        data_quality_flag: str | None = None,
+        source_consistency_status: str | None = None,
+    ) -> Dict[str, Any]:
+        record: Dict[str, Any] = {
+            "symbol": symbol,
+            "base_date": base_date,
+            "feature_name": feature_name,
+            "feature_value": float(feature_value),
+            "available_at": available_at,
+        }
+        if include_quality_columns[0]:
+            record["data_quality_flag"] = data_quality_flag
+        if include_quality_columns[1]:
+            record["source_consistency_status"] = source_consistency_status
+        return record
+
     def generate_features_for_date(self, target_date: date) -> int:
         # 1. 대상 종목 리스트 (Universe) 가져오기
         universe = self._load_universe()
@@ -82,6 +167,14 @@ class FeatureGenerator:
             # 4. 데이터 병합 (Merge)
             df = pd.merge(prices_df, supply_df, on=["symbol", "base_date"], how="left")
             df["foreign_net_buy"] = df["foreign_net_buy"].fillna(0)
+            if "source" not in df.columns:
+                if "source_x" in df.columns:
+                    df["source"] = df["source_x"]
+                elif "source_y" in df.columns:
+                    df["source"] = df["source_y"]
+
+        if "source" not in df.columns:
+            df["source"] = "UNKNOWN"
 
         # 날짜 통일 및 정렬 (요구사항 1: strftime 강제 변환)
         df["base_date"] = pd.to_datetime(df["base_date"]).dt.strftime('%Y-%m-%d')
@@ -112,6 +205,7 @@ class FeatureGenerator:
 
         # 날짜 정렬 (계산을 위해 필수)
         df = df.sort_values(["symbol", "base_date"]).reset_index(drop=True)
+        quality_columns = self._feature_quality_columns_available()
 
         # 5. 피처 계산 (Feature Engineering)
         logger.info("Calculating technical and supply features...")
@@ -135,11 +229,14 @@ class FeatureGenerator:
             close = group["close_price"]
             
             # 데이터 개수에 비례하여 return 계산 (최대 5일)
-            period_5 = min(5, n_rows - 1) if n_rows > 1 else 1
-            group["return_5d"] = close.pct_change(period_5) if n_rows > 1 else 0.0
-            
+            trading_value = group["trading_value"].astype(float)
+            group["return_5d"] = close.pct_change(5) if n_rows > 5 else np.nan
+            group["return_20d"] = close.pct_change(20) if n_rows > 20 else np.nan
+            group["return_60d"] = close.pct_change(60) if n_rows > 60 else np.nan
+
             group["moving_avg_5"] = close.rolling(5, min_periods=1).mean()
             group["moving_avg_20"] = close.rolling(20, min_periods=1).mean()
+            group["trading_value_ratio_20d"] = trading_value / trading_value.rolling(20, min_periods=20).mean()
             
             # 20일 변동성 (수익률의 표준편차)
             group["volatility_20d"] = close.pct_change().rolling(20, min_periods=1).std() if n_rows > 1 else 0.0
@@ -160,26 +257,61 @@ class FeatureGenerator:
                 continue
                 
             row = last_row.iloc[0]
-            
-            # 결과물 리스트업 (volume 등 당일 데이터만 있어도 수집)
+            return_5d_sources = self._window_source_status(group, target_pd_date, 5)
+            return_20d_sources = self._window_source_status(group, target_pd_date, 20)
+            return_60d_sources = self._window_source_status(group, target_pd_date, 60)
+            price_scale_warnings = self._detect_price_scale_warnings(symbol, group, target_pd_date)
+            if price_scale_warnings:
+                logger.warning(
+                    f"Price scale anomaly detected for {symbol} on {target_pd_date}: "
+                    f"warnings={price_scale_warnings}, close_price={row.get('close_price')}, "
+                    f"sources_5d={return_5d_sources['sources']}, sources_20d={return_20d_sources['sources']}"
+                )
+
             targets = {
-                "return_5d": row.get("return_5d", 0.0),
+                "close_price": row.get("close_price"),
+                "return_5d": None if return_5d_sources["source_mixed"] else row.get("return_5d"),
+                "return_20d": None if return_20d_sources["source_mixed"] else row.get("return_20d"),
+                "return_60d": None if return_60d_sources["source_mixed"] else row.get("return_60d"),
                 "moving_avg_5": row.get("moving_avg_5"),
                 "moving_avg_20": row.get("moving_avg_20"),
+                "trading_value_ratio_20d": None if return_20d_sources["source_mixed"] else row.get("trading_value_ratio_20d"),
                 "volatility_20d": row.get("volatility_20d", 0.0),
                 "foreign_flow_zscore": row.get("foreign_flow_zscore"),
                 "volume": row.get("volume", 0)
             }
-            
+
             for f_name, f_val in targets.items():
                 if pd.notnull(f_val):
-                    feature_records.append({
-                        "symbol": symbol,
-                        "base_date": end_date_str,
-                        "feature_name": f_name,
-                        "feature_value": float(f_val),
-                        "available_at": available_at_str
-                    })
+                    data_quality_flag = None
+                    source_consistency_status = None
+                    if f_name == "return_5d" and return_5d_sources["source_mixed"]:
+                        data_quality_flag = "SOURCE_MIXED"
+                        source_consistency_status = "SOURCE_MIXED_5D"
+                    elif f_name == "return_20d" and return_20d_sources["source_mixed"]:
+                        data_quality_flag = "SOURCE_MIXED"
+                        source_consistency_status = "SOURCE_MIXED_20D"
+                    elif f_name == "return_60d" and return_60d_sources["source_mixed"]:
+                        data_quality_flag = "SOURCE_MIXED"
+                        source_consistency_status = "SOURCE_MIXED_60D"
+                    elif f_name == "trading_value_ratio_20d" and return_20d_sources["source_mixed"]:
+                        data_quality_flag = "SOURCE_MIXED"
+                        source_consistency_status = "SOURCE_MIXED_20D"
+                    elif price_scale_warnings and f_name in {"close_price", "return_5d", "return_20d", "return_60d"}:
+                        data_quality_flag = price_scale_warnings[0]
+                        source_consistency_status = "PRICE_SCALE_WARNING"
+                    feature_records.append(
+                        self._build_feature_record(
+                            symbol=symbol,
+                            base_date=end_date_str,
+                            feature_name=f_name,
+                            feature_value=f_val,
+                            available_at=available_at_str,
+                            include_quality_columns=quality_columns,
+                            data_quality_flag=data_quality_flag,
+                            source_consistency_status=source_consistency_status,
+                        )
+                    )
                 else:
                     if symbol == "278470":
                         logger.warning(f"[APR_TARGETING] 에이피알(278470) 피처 누락: {f_name} 값이 NaN (총 데이터 수: {n_rows}건)")

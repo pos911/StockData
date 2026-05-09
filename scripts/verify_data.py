@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -14,6 +15,14 @@ from src.loaders.supabase_loader import SupabaseLoader
 from src.collectors.krx_collector import KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row
+from src.utils.report_source_quality import (
+    WATCHLIST_SYMBOLS,
+    analyze_feature_source_quality,
+    analyze_report_views,
+    analyze_watchlist_symbol,
+    detect_macro_suspicious_values,
+    fetch_latest_macro_row,
+)
 from src.utils.trading_calendar import (
     get_market_calendar_diagnostic,
     get_latest_trading_day_on_or_before,
@@ -22,7 +31,7 @@ from src.utils.trading_calendar import (
     is_market_open,
 )
 from src.utils.config_loader import load_config
-from src.utils.time_utils import get_current_utc, get_kst_target_date
+from src.utils.time_utils import get_current_utc, get_kst_target_date, parse_date_string
 from src.utils.symbols import is_q_prefixed_numeric_symbol, normalize_symbol_value
 
 
@@ -1458,11 +1467,74 @@ def _print_report_required_etf_coverage(loader: SupabaseLoader, today: date):
         print("status=SUCCESS")
 
 
-def verify_data():
+def _print_report_source_quality(loader: SupabaseLoader, today: date):
+    print("\n=== REPORT SOURCE QUALITY ===")
+    macro_row = fetch_latest_macro_row(loader, today) or {}
+    macro_status = "SUCCESS"
+    suspicious_macro_values = detect_macro_suspicious_values(macro_row)
+    if suspicious_macro_values:
+        macro_status = "WARN_PRICE_SCALE_ANOMALY"
+
+    watchlist_rows = [analyze_watchlist_symbol(loader, symbol, today) for symbol in WATCHLIST_SYMBOLS]
+    feature_rows = [analyze_feature_source_quality(loader, symbol, today) for symbol in WATCHLIST_SYMBOLS]
+    report_view_quality = analyze_report_views(loader, today)
+    stale_watchlist = sum(1 for row in watchlist_rows if (row.get("stale_days") or 0) > 3)
+    source_mixed_count = sum(1 for row in feature_rows if not row.get("calculation_source_consistent"))
+
+    try:
+        sector_rows = loader.client.table("report_sector_etf_signal_view").select(
+            "symbol,name,latest_price_date,stale_days,data_status"
+        ).execute().data or []
+    except Exception:
+        sector_rows = []
+    stale_sector = [
+        row
+        for row in sector_rows
+        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "").startswith("STALE")
+    ]
+
+    print(
+        f"macro_source_quality={{'base_date': {macro_row.get('base_date')!r}, "
+        f"'sp500': {macro_row.get('sp500')}, 'nasdaq': {macro_row.get('nasdaq')}, "
+        f"'sox': {macro_row.get('sox')}, 'brent': {macro_row.get('brent')}, "
+        f"'wti': {macro_row.get('wti')}, 'warnings': {suspicious_macro_values}}}"
+    )
+    print(
+        f"watchlist_price_quality={{'symbols_checked': {len(watchlist_rows)}, "
+        f"'stale_symbols': {[row['symbol'] for row in watchlist_rows if (row.get('stale_days') or 0) > 3]}, "
+        f"'scale_warning_symbols': {[row['symbol'] for row in watchlist_rows if row.get('price_scale_warning')]}}}"
+    )
+    print(
+        f"feature_source_consistency={{'symbols_checked': {len(feature_rows)}, "
+        f"'source_mixed_symbols': {[row['symbol'] for row in feature_rows if not row.get('calculation_source_consistent')]}}}"
+    )
+    print(
+        f"sector_etf_staleness={{'rows': {len(sector_rows)}, "
+        f"'stale_symbols': {[row.get('symbol') for row in stale_sector[:20]]}}}"
+    )
+    print(
+        f"report_view_target_date_consistency={{'stale_watchlist_count': {report_view_quality['stale_watchlist_count']}, "
+        f"'stale_sector_etf_count': {report_view_quality['stale_sector_etf_count']}, "
+        f"'future_date_rows': {report_view_quality['future_date_rows']}}}"
+    )
+
+    status = "SUCCESS"
+    if report_view_quality["future_date_rows"] > 0:
+        status = "FAIL_REPORT_SOURCE_QUALITY"
+    elif source_mixed_count > 0:
+        status = "WARN_FEATURE_SOURCE_MIXED"
+    elif stale_watchlist > 0 or stale_sector:
+        status = "WARN_REPORT_SOURCE_STALE"
+    elif suspicious_macro_values:
+        status = "WARN_PRICE_SCALE_ANOMALY"
+    print(f"status={status}")
+
+
+def verify_data(target_date: date | None = None):
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     runner_date_utc = get_current_utc().date()
-    today = get_kst_target_date()
+    today = target_date or get_kst_target_date()
     target_date = today.isoformat()
     active = _active_symbols(loader)
     xkrx_is_open = is_market_open(loader, today, "XKRX")
@@ -1522,8 +1594,12 @@ def verify_data():
     _print_feature_without_valid_price(loader, today)
     _print_stock_detail_universe_quality(config, loader)
     _print_report_required_etf_coverage(loader, today)
+    _print_report_source_quality(loader, today)
     _macro_series_status(loader, today)
 
 
 if __name__ == "__main__":
-    verify_data()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", type=str, help="YYYY-MM-DD or YYYYMMDD")
+    args = parser.parse_args()
+    verify_data(parse_date_string(args.date) if args.date else None)

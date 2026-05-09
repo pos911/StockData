@@ -821,6 +821,12 @@ limit 10;
 - KOSPI/KOSDAQ target_date 가격이 부족하면 target_date 한국 주식 ranking 생성 차단.
 - `normalized_market_rankings_daily.source_base_date` 도입 및 `VALID_PRICE_FALLBACK` metadata 강화.
 
+### 2026-05-09
+
+- `feature_store_daily` long format feature에 source 품질 경고를 연결할 수 있도록 `data_quality_flag`, `source_consistency_status` 컬럼 확장 SQL을 추가.
+- `return_5d`, `return_20d`, `return_60d`, `trading_value_ratio_20d`는 동일 symbol의 가격 window source가 섞이면 신뢰도 경고 또는 null 처리 대상이다.
+- `report_watchlist_snapshot_view`, `report_sector_etf_signal_view`, `report_morning_macro_view` 원천값 진단 스크립트를 추가해 stale/future-date/source-mixed 여부를 분리 점검한다.
+
 ---
 
 ## 7. 남은 문서화 과제
