@@ -5,6 +5,7 @@ from datetime import date, datetime
 from .base import KISBaseCollector
 from .mapping import KIS_MAPPING
 from src.utils.logger import get_logger
+from src.utils.market_data_quality import is_valid_price_row
 from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
@@ -201,6 +202,7 @@ class KISDomesticStockCollector(KISBaseCollector):
             return []
 
         records = []
+        normalized_records = []
         raw_records = []
         previous_market_cap = None
         now_iso = datetime.now().isoformat()
@@ -230,6 +232,8 @@ class KISDomesticStockCollector(KISBaseCollector):
                 "available_at": available_at or datetime.now().isoformat(),
             }
             records.append(record)
+            if is_valid_price_row(record, market_is_open=True):
+                normalized_records.append(record)
             raw_records.append(
                 {
                     "source": source_label,
@@ -246,6 +250,9 @@ class KISDomesticStockCollector(KISBaseCollector):
                                 "stck_hgpr": "high_price",
                                 "stck_lwpr": "low_price",
                             },
+                            "source_base_date": record["base_date"],
+                            "kis_tr_id": tr_id,
+                            "source_label": source_label,
                         },
                         ensure_ascii=False,
                     ),
@@ -257,7 +264,7 @@ class KISDomesticStockCollector(KISBaseCollector):
                 previous_market_cap = market_cap
 
         await self.upsert_records("raw_stock_prices_daily", raw_records)
-        await self.upsert_records("normalized_stock_prices_daily", records)
+        await self.upsert_records("normalized_stock_prices_daily", normalized_records)
         return records
 
     async def fetch_investor_trend(self, symbol: str, available_at: Optional[str] = None):

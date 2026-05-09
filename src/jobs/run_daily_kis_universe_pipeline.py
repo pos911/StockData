@@ -27,6 +27,26 @@ DEFAULT_LIMIT = 300
 HARD_LIMIT = 500
 
 
+def _reset_target_date_kis_detail_rows(loader: SupabaseLoader, base_date: str) -> None:
+    for table_name in (
+        "raw_stock_prices_daily",
+        "normalized_stock_prices_daily",
+        "normalized_stock_snapshots_daily",
+        "normalized_stock_fundamentals_ratios",
+    ):
+        try:
+            (
+                loader.client.table(table_name)
+                .delete()
+                .eq("base_date", base_date)
+                .eq("source", "KIS_DETAIL")
+                .execute()
+            )
+            logger.info(f"Cleared existing KIS_DETAIL rows for {table_name} base_date={base_date}")
+        except Exception as exc:
+            logger.warning(f"Failed to clear KIS_DETAIL rows for {table_name} base_date={base_date}: {exc}")
+
+
 def _to_snapshot_record(snapshot: dict, available_at: str) -> dict:
     return {
         "symbol": snapshot.get("symbol"),
@@ -114,6 +134,9 @@ async def run_pipeline(target_date: date, limit: int | None = None, dry_run: boo
                 "failed_symbols": [],
                 "elapsed_seconds": 0.0,
             }
+
+        if not dry_run:
+            _reset_target_date_kis_detail_rows(loader, base_date)
 
         price_valid_count = 0
         snapshot_success_count = 0

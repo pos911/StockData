@@ -417,7 +417,6 @@ class DynamicUniverseLoader:
         master_map = self._load_master_symbol_map()
         static_rows = self._load_static_universe()
         report_rows = self._load_latest_kis_ranking_universe(master_map)
-        legacy_ranked_rows = self._load_latest_ranked_universe(master_map)
         kis_volume_rows = await self._load_live_kis_volume_rank_universe(master_map) if include_live_kis_volume else []
 
         combined: Dict[str, Dict[str, Any]] = {}
@@ -425,7 +424,6 @@ class DynamicUniverseLoader:
             ("static", static_rows),
             ("kis_volume_rank", kis_volume_rows),
             ("report_rank", report_rows),
-            ("ranking", legacy_ranked_rows),
         ):
             for row in rows:
                 symbol = normalize_symbol_value(row.get("code"))

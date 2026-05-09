@@ -25,6 +25,13 @@ PRICE_SCALE_BOUNDS = {
     "278470": (100_000, 1_000_000),
     "058470": (50_000, 500_000),
 }
+SOURCE_PRIORITY = {
+    "KIS_DETAIL": 0,
+    "KIS": 1,
+    "KRX": 2,
+    "VALID_PRICE_FALLBACK": 3,
+    "UNKNOWN": 4,
+}
 
 
 def _safe_float(value: Any) -> float | None:
@@ -84,6 +91,29 @@ def _window_rows(valid_rows: list[dict[str, Any]], window_size: int) -> list[dic
     return valid_rows[-required:]
 
 
+def _source_priority(value: Any) -> int:
+    return SOURCE_PRIORITY.get(str(value or "UNKNOWN").strip().upper(), SOURCE_PRIORITY["UNKNOWN"])
+
+
+def _prioritize_price_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            normalize_symbol_value(row.get("symbol")),
+            str(row.get("base_date") or ""),
+            _source_priority(row.get("source")),
+            str(row.get("available_at") or ""),
+        ),
+    )
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in sorted_rows:
+        key = (normalize_symbol_value(row.get("symbol")), str(row.get("base_date") or "")[:10])
+        deduped.setdefault(key, row)
+    return sorted(deduped.values(), key=lambda row: str(row.get("base_date") or ""))
+
+
 def _window_source_summary(valid_rows: list[dict[str, Any]], window_size: int) -> dict[str, Any]:
     rows = _window_rows(valid_rows, window_size)
     if not rows:
@@ -133,7 +163,7 @@ def trading_stale_days(loader: SupabaseLoader, latest_date: date | None, target_
 
 def analyze_watchlist_symbol(loader: SupabaseLoader, symbol: str, target_date: date) -> dict[str, Any]:
     symbol = normalize_symbol_value(symbol)
-    rows = _fetch_price_rows(loader, symbol, target_date)
+    rows = _prioritize_price_rows(_fetch_price_rows(loader, symbol, target_date))
     valid_rows = [row for row in rows if is_valid_price_row(row, market_is_open=True)]
     latest_row = valid_rows[-1] if valid_rows else None
     latest_date = _safe_date(latest_row.get("base_date")) if latest_row else None
@@ -241,6 +271,19 @@ def fetch_latest_macro_row(loader: SupabaseLoader, target_date: date) -> dict[st
 
 def analyze_report_views(loader: SupabaseLoader, target_date: date) -> dict[str, Any]:
     target_date_str = target_date.isoformat()
+    static_rows = (
+        loader.client.table("static_stock_universe")
+        .select("symbol")
+        .eq("enabled", True)
+        .execute()
+        .data
+        or []
+    )
+    static_enabled = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in static_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
     watch_rows = (
         loader.client.table("report_watchlist_snapshot_view")
         .select("*")
@@ -248,6 +291,9 @@ def analyze_report_views(loader: SupabaseLoader, target_date: date) -> dict[str,
         .data
         or []
     )
+    active_watch_rows = [
+        row for row in watch_rows if normalize_symbol_value(row.get("symbol")) in static_enabled
+    ]
     etf_rows = (
         loader.client.table("report_sector_etf_signal_view")
         .select("*")
@@ -257,10 +303,10 @@ def analyze_report_views(loader: SupabaseLoader, target_date: date) -> dict[str,
     )
     future_watch = [row for row in watch_rows if str(row.get("base_date") or "")[:10] > target_date_str]
     future_etf = [row for row in etf_rows if str(row.get("latest_price_date") or "")[:10] > target_date_str]
-    stale_watch = [row for row in watch_rows if row.get("data_status") == "STALE"]
+    stale_watch = [row for row in active_watch_rows if row.get("data_status") == "STALE"]
     stale_sector = [
         row for row in etf_rows
-        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "").startswith("STALE")
+        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "") == "STALE"
     ]
     status = "SUCCESS"
     if future_watch or future_etf:
@@ -269,9 +315,132 @@ def analyze_report_views(loader: SupabaseLoader, target_date: date) -> dict[str,
         status = "WARN_REPORT_SOURCE_STALE"
     return {
         "report_watchlist_snapshot_view_rows": len(watch_rows),
+        "report_watchlist_active_rows": len(active_watch_rows),
         "report_sector_etf_signal_view_rows": len(etf_rows),
         "stale_watchlist_count": len(stale_watch),
         "stale_sector_etf_count": len(stale_sector),
         "future_date_rows": len(future_watch) + len(future_etf),
+        "status": status,
+    }
+
+
+def analyze_universe_alignment(loader: SupabaseLoader, target_date: date) -> dict[str, Any]:
+    target_date_str = target_date.isoformat()
+    static_rows = (
+        loader.client.table("static_stock_universe")
+        .select("symbol")
+        .eq("enabled", True)
+        .execute()
+        .data
+        or []
+    )
+    static_enabled = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in static_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
+
+    snapshot_rows = (
+        loader.client.table("normalized_stock_snapshots_daily")
+        .select("symbol")
+        .eq("base_date", target_date_str)
+        .eq("source", "KIS_DETAIL")
+        .execute()
+        .data
+        or []
+    )
+    kis_detail_universe = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in snapshot_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
+
+    price_rows = (
+        loader.client.table("normalized_stock_prices_daily")
+        .select("symbol")
+        .eq("base_date", target_date_str)
+        .eq("source", "KIS_DETAIL")
+        .execute()
+        .data
+        or []
+    )
+    kis_detail_price_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in price_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
+
+    feature_rows = (
+        loader.client.table("feature_store_daily")
+        .select("symbol")
+        .eq("base_date", target_date_str)
+        .execute()
+        .data
+        or []
+    )
+    feature_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in feature_rows
+        if row.get("symbol") != "GLOBAL" and normalize_symbol_value(row.get("symbol"))
+    }
+
+    report_rows = (
+        loader.client.table("report_watchlist_snapshot_view")
+        .select("symbol, data_status")
+        .execute()
+        .data
+        or []
+    )
+    report_watchlist_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in report_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
+    stale_in_report_view = sorted(
+        {
+            normalize_symbol_value(row.get("symbol"))
+            for row in report_rows
+            if normalize_symbol_value(row.get("symbol")) in static_enabled
+            and str(row.get("data_status") or "").startswith("STALE")
+        }
+    )
+
+    ranking_rows = (
+        loader.client.table("normalized_market_rankings_daily")
+        .select("symbol")
+        .eq("base_date", target_date_str)
+        .eq("source", "KIS")
+        .eq("rank_type", "volume")
+        .execute()
+        .data
+        or []
+    )
+    kis_volume_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in ranking_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
+
+    missing_in_kis_detail = sorted(static_enabled - kis_detail_universe)
+    missing_in_feature = sorted(static_enabled - feature_symbols)
+    missing_in_report_view = sorted(static_enabled - report_watchlist_symbols)
+
+    status = "SUCCESS"
+    if missing_in_kis_detail:
+        status = "FAIL_STATIC_WATCHLIST_MISSING"
+    elif missing_in_feature or missing_in_report_view or stale_in_report_view:
+        status = "WARN_UNIVERSE_MISMATCH"
+
+    return {
+        "static_enabled_count": len(static_enabled),
+        "kis_detail_universe_count": len(kis_detail_universe),
+        "kis_detail_price_symbols_count": len(kis_detail_price_symbols),
+        "feature_symbol_count": len(feature_symbols),
+        "report_watchlist_count": len(report_watchlist_symbols),
+        "kis_volume_symbol_count": len(kis_volume_symbols),
+        "missing_in_kis_detail": missing_in_kis_detail,
+        "missing_in_feature": missing_in_feature,
+        "missing_in_report_view": missing_in_report_view,
+        "stale_in_report_view": stale_in_report_view,
         "status": status,
     }

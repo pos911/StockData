@@ -81,7 +81,7 @@ def main(target_date: date) -> None:
     )
     for row in etf_rows:
         warnings = []
-        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "").startswith("STALE"):
+        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "") == "STALE":
             warnings.append("STALE")
         print("\n[SECTOR ETF QUALITY]")
         print(f"- symbol: {row.get('symbol')}")
@@ -98,6 +98,7 @@ def main(target_date: date) -> None:
     view_quality = analyze_report_views(loader, target_date)
     print("\n[REPORT VIEW QUALITY]")
     print(f"- report_watchlist_snapshot_view rows: {view_quality['report_watchlist_snapshot_view_rows']}")
+    print(f"- report_watchlist_active_rows: {view_quality.get('report_watchlist_active_rows')}")
     print(f"- report_sector_etf_signal_view rows: {view_quality['report_sector_etf_signal_view_rows']}")
     print(f"- stale_watchlist_count: {view_quality['stale_watchlist_count']}")
     print(f"- stale_sector_etf_count: {view_quality['stale_sector_etf_count']}")

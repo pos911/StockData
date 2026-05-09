@@ -17,6 +17,7 @@ from src.utils.dynamic_universe_loader import DynamicUniverseLoader
 from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row
 from src.utils.report_source_quality import (
     WATCHLIST_SYMBOLS,
+    analyze_universe_alignment,
     analyze_feature_source_quality,
     analyze_report_views,
     analyze_watchlist_symbol,
@@ -691,6 +692,7 @@ def _print_kis_universe_coverage(loader: SupabaseLoader, today: date):
     print("\n=== KIS UNIVERSE COVERAGE ===")
     latest_log = _latest_pipeline_log(loader, "daily_kis_universe_pipeline")
     target_date = str((latest_log or {}).get("target_date") or today.isoformat())[:10]
+    alignment = analyze_universe_alignment(loader, date.fromisoformat(target_date))
     snapshot_rows = (
         loader.client.table("normalized_stock_snapshots_daily")
         .select("symbol")
@@ -734,18 +736,15 @@ def _print_kis_universe_coverage(loader: SupabaseLoader, today: date):
                 failed_symbols_count = int(text.split(marker, 1)[1].split(";", 1)[0])
             except Exception:
                 failed_symbols_count = 0
-    universe_count = 0
     kis_detail_success_count = len(raw_symbols)
-    if latest_log and latest_log.get("error_message"):
-        text = str(latest_log.get("error_message"))
-        marker = "universe_count="
-        if marker in text:
-            try:
-                universe_count = int(text.split(marker, 1)[1].split(";", 1)[0])
-            except Exception:
-                universe_count = 0
-    if universe_count == 0:
-        universe_count = max(kis_detail_success_count, len(snapshot_rows), len(ratio_rows))
+    universe_count = max(
+        kis_detail_success_count,
+        len(snapshot_rows),
+        len(ratio_rows),
+        int(alignment.get("kis_detail_universe_count") or 0),
+    )
+    if failed_symbols_count == 0 and universe_count >= kis_detail_success_count:
+        failed_symbols_count = max(universe_count - kis_detail_success_count, 0)
     status = "SUCCESS"
     if universe_count == 0:
         status = "FAIL_KIS_UNIVERSE_EMPTY"
@@ -1490,7 +1489,7 @@ def _print_report_source_quality(loader: SupabaseLoader, today: date):
     stale_sector = [
         row
         for row in sector_rows
-        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "").startswith("STALE")
+        if (row.get("stale_days") or 0) > 3 or str(row.get("data_status") or "") == "STALE"
     ]
 
     print(
@@ -1514,6 +1513,7 @@ def _print_report_source_quality(loader: SupabaseLoader, today: date):
     )
     print(
         f"report_view_target_date_consistency={{'stale_watchlist_count': {report_view_quality['stale_watchlist_count']}, "
+        f"'report_watchlist_active_rows': {report_view_quality.get('report_watchlist_active_rows')}, "
         f"'stale_sector_etf_count': {report_view_quality['stale_sector_etf_count']}, "
         f"'future_date_rows': {report_view_quality['future_date_rows']}}}"
     )
@@ -1528,6 +1528,21 @@ def _print_report_source_quality(loader: SupabaseLoader, today: date):
     elif suspicious_macro_values:
         status = "WARN_PRICE_SCALE_ANOMALY"
     print(f"status={status}")
+
+
+def _print_universe_alignment_quality(loader: SupabaseLoader, today: date):
+    print("\n=== UNIVERSE ALIGNMENT QUALITY ===")
+    result = analyze_universe_alignment(loader, today)
+    print(f"static_enabled_count={result['static_enabled_count']}")
+    print(f"kis_detail_universe_count={result['kis_detail_universe_count']}")
+    print(f"kis_detail_price_symbols_count={result['kis_detail_price_symbols_count']}")
+    print(f"feature_symbol_count={result['feature_symbol_count']}")
+    print(f"report_watchlist_count={result['report_watchlist_count']}")
+    print(f"missing_in_kis_detail={result['missing_in_kis_detail']}")
+    print(f"missing_in_feature={result['missing_in_feature']}")
+    print(f"missing_in_report_view={result['missing_in_report_view']}")
+    print(f"stale_in_report_view={result['stale_in_report_view']}")
+    print(f"status={result['status']}")
 
 
 def verify_data(target_date: date | None = None):
@@ -1592,6 +1607,7 @@ def verify_data(target_date: date | None = None):
     _print_market_closed_ingestion_guardrail(loader, today)
     _print_open_market_zero_volume_quality(loader, today)
     _print_feature_without_valid_price(loader, today)
+    _print_universe_alignment_quality(loader, today)
     _print_stock_detail_universe_quality(config, loader)
     _print_report_required_etf_coverage(loader, today)
     _print_report_source_quality(loader, today)

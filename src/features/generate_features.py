@@ -15,6 +15,27 @@ from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
 
+FEATURE_SOURCE_PRIORITY = {
+    "KIS_DETAIL": 0,
+    "KIS": 1,
+    "KRX": 2,
+    "VALID_PRICE_FALLBACK": 3,
+    "UNKNOWN": 4,
+}
+
+RECOMPUTED_FEATURE_NAMES = [
+    "close_price",
+    "return_5d",
+    "return_20d",
+    "return_60d",
+    "moving_avg_5",
+    "moving_avg_20",
+    "trading_value_ratio_20d",
+    "volatility_20d",
+    "foreign_flow_zscore",
+    "volume",
+]
+
 class FeatureGenerator:
     """
     Normalized 데이터를 바탕으로 실제 Trading Algorithmic Feature들을 생성합니다.
@@ -123,6 +144,61 @@ class FeatureGenerator:
             record["source_consistency_status"] = source_consistency_status
         return record
 
+    @staticmethod
+    def _source_priority(value: Any) -> int:
+        normalized = str(value or "UNKNOWN").strip().upper()
+        return FEATURE_SOURCE_PRIORITY.get(normalized, FEATURE_SOURCE_PRIORITY["UNKNOWN"])
+
+    def _apply_price_source_priority(self, prices_df: pd.DataFrame) -> pd.DataFrame:
+        if prices_df.empty:
+            return prices_df
+        prioritized = prices_df.copy()
+        if "source" not in prioritized.columns:
+            prioritized["source"] = "UNKNOWN"
+        prioritized["source"] = prioritized["source"].fillna("UNKNOWN")
+        prioritized["source_priority"] = prioritized["source"].map(self._source_priority)
+        sort_columns = ["symbol", "base_date", "source_priority"]
+        ascending = [True, True, True]
+        if "available_at" in prioritized.columns:
+            sort_columns.append("available_at")
+            ascending.append(False)
+        prioritized = prioritized.sort_values(sort_columns, ascending=ascending)
+        prioritized = prioritized.drop_duplicates(subset=["symbol", "base_date"], keep="first")
+        prioritized = prioritized.drop(columns=["source_priority"], errors="ignore")
+        return prioritized.reset_index(drop=True)
+
+    def _delete_recomputed_feature_rows(self, base_date: str, symbols: list[str] | None = None) -> None:
+        feature_names = RECOMPUTED_FEATURE_NAMES
+        if not symbols:
+            try:
+                (
+                    self.loader.client.table("feature_store_daily")
+                    .delete()
+                    .eq("base_date", base_date)
+                    .neq("symbol", "GLOBAL")
+                    .in_("feature_name", feature_names)
+                    .execute()
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to delete stale feature rows before recompute. base_date={base_date}, note={exc}"
+                )
+            return
+        for symbol in symbols:
+            try:
+                (
+                    self.loader.client.table("feature_store_daily")
+                    .delete()
+                    .eq("base_date", base_date)
+                    .eq("symbol", symbol)
+                    .in_("feature_name", feature_names)
+                    .execute()
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to delete stale feature rows before recompute. symbol={symbol}, base_date={base_date}, note={exc}"
+                )
+
     def generate_features_for_date(self, target_date: date) -> int:
         # 1. 대상 종목 리스트 (Universe) 가져오기
         universe = self._load_universe()
@@ -155,6 +231,7 @@ class FeatureGenerator:
                 axis=1,
             )
         ].copy()
+        prices_df = self._apply_price_source_priority(prices_df)
         if prices_df.empty:
             logger.error("No valid price rows remain after filtering zero-volume or zero-trading-value rows.")
             return 0
@@ -511,6 +588,7 @@ class FeatureGenerator:
         logger.info(f"Target count to upsert: {record_count}")
         
         if record_count > 0:
+            self._delete_recomputed_feature_rows(end_date_str)
             success = self.loader.upsert_records("feature_store_daily", feature_records)
             if not success:
                 logger.error(f"Feature upsert failed for {target_date}.")
