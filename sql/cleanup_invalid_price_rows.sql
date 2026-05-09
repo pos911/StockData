@@ -5,8 +5,12 @@ SELECT
   COUNT(*) FILTER (WHERE p.close_price IS NULL OR p.close_price <= 0) AS zero_or_null_close_rows,
   COUNT(*) FILTER (WHERE p.source IS NULL OR p.source = '') AS null_source_rows,
   COUNT(*) FILTER (
-    WHERE COALESCE(c.is_open, false) = false
-  ) AS non_trading_day_rows
+    WHERE c.calendar_date IS NOT NULL
+      AND c.is_open = false
+  ) AS confirmed_non_trading_day_rows,
+  COUNT(*) FILTER (
+    WHERE c.calendar_date IS NULL
+  ) AS calendar_missing_rows
 FROM public.normalized_stock_prices_daily p
 JOIN public.stocks_master m
   ON p.symbol = m.symbol
@@ -15,7 +19,7 @@ LEFT JOIN public.market_trading_calendar c
  AND c.exchange_code = 'XKRX'
 WHERE m.market IN ('KOSPI', 'KOSDAQ', 'ETF', 'ETN');
 
--- 2. Delete invalid normalized rows
+-- 2. Delete invalid value/source rows
 DELETE FROM public.normalized_stock_prices_daily p
 USING public.stocks_master m
 WHERE p.symbol = m.symbol
@@ -27,17 +31,17 @@ WHERE p.symbol = m.symbol
     OR p.source = ''
   );
 
--- 3. Delete non-trading day rows
+-- 3. Delete only confirmed XKRX closed-day rows
 WITH closed_rows AS (
   SELECT p.symbol, p.base_date
   FROM public.normalized_stock_prices_daily p
   JOIN public.stocks_master m
     ON p.symbol = m.symbol
-  LEFT JOIN public.market_trading_calendar c
+  JOIN public.market_trading_calendar c
     ON c.calendar_date = p.base_date
    AND c.exchange_code = 'XKRX'
   WHERE m.market IN ('KOSPI', 'KOSDAQ', 'ETF', 'ETN')
-    AND COALESCE(c.is_open, false) = false
+    AND c.is_open = false
 )
 DELETE FROM public.normalized_stock_prices_daily p
 USING closed_rows x
@@ -49,8 +53,12 @@ SELECT
   COUNT(*) FILTER (WHERE p.close_price IS NULL OR p.close_price <= 0) AS zero_or_null_close_rows,
   COUNT(*) FILTER (WHERE p.source IS NULL OR p.source = '') AS null_source_rows,
   COUNT(*) FILTER (
-    WHERE COALESCE(c.is_open, false) = false
-  ) AS non_trading_day_rows
+    WHERE c.calendar_date IS NOT NULL
+      AND c.is_open = false
+  ) AS confirmed_non_trading_day_rows,
+  COUNT(*) FILTER (
+    WHERE c.calendar_date IS NULL
+  ) AS calendar_missing_rows
 FROM public.normalized_stock_prices_daily p
 JOIN public.stocks_master m
   ON p.symbol = m.symbol
@@ -60,4 +68,5 @@ LEFT JOIN public.market_trading_calendar c
 WHERE m.market IN ('KOSPI', 'KOSDAQ', 'ETF', 'ETN');
 
 COMMIT;
+
 NOTIFY pgrst, 'reload schema';
