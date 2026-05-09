@@ -14,7 +14,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.loaders.supabase_loader import SupabaseLoader
 from src.collectors.krx_collector import KOSDAQ_STOCK_DAILY_TRADING_IMPLEMENTED
 from src.utils.dynamic_universe_loader import DynamicUniverseLoader
-from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row
+from src.utils.market_data_quality import get_latest_valid_price_date, is_valid_price_row, scan_invalid_price_rows
 from src.utils.report_source_quality import (
     WATCHLIST_SYMBOLS,
     analyze_universe_alignment,
@@ -1276,6 +1276,20 @@ def _print_open_market_zero_volume_quality(loader: SupabaseLoader, today: date):
         print("status=SUCCESS")
 
 
+def _print_invalid_price_row_quality(loader: SupabaseLoader, today: date):
+    print("\n=== INVALID PRICE ROW QUALITY ===")
+    result = scan_invalid_price_rows(loader, today, lookback_days=180)
+    print(f"non_trading_day_price_rows={result['non_trading_day_price_rows']}")
+    print(f"zero_close_rows={result['zero_close_rows']}")
+    print(f"null_source_rows={result['null_source_rows']}")
+    print(f"duplicate_weekend_carry_rows={result['duplicate_weekend_carry_rows']}")
+    print(f"sample_non_trading_rows={result['sample_non_trading_rows']}")
+    print(f"sample_zero_close_rows={result['sample_zero_close_rows']}")
+    print(f"sample_null_source_rows={result['sample_null_source_rows']}")
+    print(f"sample_duplicate_weekend_carry_rows={result['sample_duplicate_weekend_carry_rows']}")
+    print(f"status={result['status']}")
+
+
 def _print_feature_without_valid_price(loader: SupabaseLoader, today: date):
     print("\n=== FEATURE WITHOUT VALID PRICE ===")
     target_date = today.isoformat()
@@ -1606,6 +1620,7 @@ def verify_data(target_date: date | None = None):
     _print_market_calendar_quality(loader, today)
     _print_market_closed_ingestion_guardrail(loader, today)
     _print_open_market_zero_volume_quality(loader, today)
+    _print_invalid_price_row_quality(loader, today)
     _print_feature_without_valid_price(loader, today)
     _print_universe_alignment_quality(loader, today)
     _print_stock_detail_universe_quality(config, loader)

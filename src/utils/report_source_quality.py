@@ -6,7 +6,7 @@ from statistics import median
 from typing import Any
 
 from src.loaders.supabase_loader import SupabaseLoader
-from src.utils.market_data_quality import is_valid_price_row
+from src.utils.market_data_quality import is_valid_price_row, load_trading_day_strings
 from src.utils.symbols import normalize_symbol_value
 from src.utils.trading_calendar import get_trading_days_between
 
@@ -164,7 +164,21 @@ def trading_stale_days(loader: SupabaseLoader, latest_date: date | None, target_
 def analyze_watchlist_symbol(loader: SupabaseLoader, symbol: str, target_date: date) -> dict[str, Any]:
     symbol = normalize_symbol_value(symbol)
     rows = _prioritize_price_rows(_fetch_price_rows(loader, symbol, target_date))
-    valid_rows = [row for row in rows if is_valid_price_row(row, market_is_open=True)]
+    start_date = target_date - timedelta(days=90)
+    trading_days = load_trading_day_strings(loader, start_date, target_date, exchange_code="XKRX")
+    invalid_non_trading_rows = [
+        row for row in rows if trading_days and str(row.get("base_date") or "")[:10] not in trading_days
+    ]
+    invalid_zero_close_rows = [
+        row for row in rows if (_safe_float(row.get("close_price")) or 0) <= 0
+    ]
+    null_source_rows = [row for row in rows if not row.get("source")]
+    valid_rows = [
+        row
+        for row in rows
+        if (not trading_days or str(row.get("base_date") or "")[:10] in trading_days)
+        and is_valid_price_row(row, market_is_open=True, require_source=True)
+    ]
     latest_row = valid_rows[-1] if valid_rows else None
     latest_date = _safe_date(latest_row.get("base_date")) if latest_row else None
     stale_days = trading_stale_days(loader, latest_date, target_date, exchange_code="XKRX")
@@ -208,6 +222,10 @@ def analyze_watchlist_symbol(loader: SupabaseLoader, symbol: str, target_date: d
         "source_mixed": source_mixed,
         "price_scale_warning": price_scale_warning,
         "stale_days": stale_days,
+        "invalid_non_trading_rows_count": len(invalid_non_trading_rows),
+        "invalid_zero_close_rows_count": len(invalid_zero_close_rows),
+        "null_source_rows_count": len(null_source_rows),
+        "duplicate_non_trading_rows_sample": invalid_non_trading_rows[:5],
         "status": status,
         "valid_rows": valid_rows,
     }

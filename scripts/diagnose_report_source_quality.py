@@ -57,6 +57,10 @@ def main(target_date: date) -> None:
         print(f"- return_20d: {watch.get('return_20d')}")
         print(f"- source_mixed: {watch.get('source_mixed')}")
         print(f"- price_scale_warning: {watch.get('price_scale_warning')}")
+        print(f"- invalid_non_trading_rows_count: {watch.get('invalid_non_trading_rows_count')}")
+        print(f"- invalid_zero_close_rows_count: {watch.get('invalid_zero_close_rows_count')}")
+        print(f"- null_source_rows_count: {watch.get('null_source_rows_count')}")
+        print(f"- duplicate_non_trading_rows_sample: {_printable(watch.get('duplicate_non_trading_rows_sample'))}")
         print(f"- stale_days: {watch.get('stale_days')}")
         print(f"- status: {watch.get('status')}")
 

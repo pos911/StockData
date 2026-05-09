@@ -10,7 +10,7 @@ from src.utils.logger import get_logger
 from src.utils.time_utils import get_current_kst, generate_available_at_for_eod
 from src.loaders.supabase_loader import SupabaseLoader
 from src.utils.config_loader import load_config
-from src.utils.market_data_quality import is_valid_price_row
+from src.utils.market_data_quality import is_valid_price_row, load_trading_day_strings
 from src.utils.symbols import normalize_symbol_value
 
 logger = get_logger(__name__)
@@ -167,6 +167,36 @@ class FeatureGenerator:
         prioritized = prioritized.drop(columns=["source_priority"], errors="ignore")
         return prioritized.reset_index(drop=True)
 
+    def _filter_feature_price_rows(
+        self,
+        prices_df: pd.DataFrame,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame:
+        if prices_df.empty:
+            return prices_df
+        filtered = prices_df.copy()
+        filtered["base_date"] = pd.to_datetime(filtered["base_date"]).dt.strftime("%Y-%m-%d")
+        trading_days = load_trading_day_strings(self.loader, start_date, end_date, exchange_code="XKRX")
+        if trading_days:
+            filtered = filtered[filtered["base_date"].isin(trading_days)].copy()
+        else:
+            logger.warning(
+                "No XKRX trading calendar rows available while filtering feature prices. "
+                "Proceeding without explicit trading-day filtering."
+            )
+        filtered = filtered[
+            filtered.apply(
+                lambda row: is_valid_price_row(
+                    row.to_dict(),
+                    market_is_open=True,
+                    require_source=True,
+                ),
+                axis=1,
+            )
+        ].copy()
+        return filtered
+
     def _delete_recomputed_feature_rows(self, base_date: str, symbols: list[str] | None = None) -> None:
         feature_names = RECOMPUTED_FEATURE_NAMES
         if not symbols:
@@ -225,15 +255,10 @@ class FeatureGenerator:
         if prices_df.empty:
             logger.error("Required Price data is missing in Supabase.")
             return 0
-        prices_df = prices_df[
-            prices_df.apply(
-                lambda row: is_valid_price_row(row.to_dict(), market_is_open=True),
-                axis=1,
-            )
-        ].copy()
+        prices_df = self._filter_feature_price_rows(prices_df, start_date, target_date)
         prices_df = self._apply_price_source_priority(prices_df)
         if prices_df.empty:
-            logger.error("No valid price rows remain after filtering zero-volume or zero-trading-value rows.")
+            logger.error("No valid price rows remain after filtering trading-day, source, and positive-price requirements.")
             return 0
 
         if supply_df.empty:

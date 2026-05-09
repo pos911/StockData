@@ -42,14 +42,138 @@ def _fetch_rows(
     return result.data or []
 
 
-def is_valid_price_row(row: dict[str, Any], market_is_open: bool | None = None) -> bool:
+def _to_float(value: Any) -> float | None:
+    if value in (None, "", "-"):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def load_trading_day_strings(
+    loader: SupabaseLoader,
+    start_date: date,
+    end_date: date,
+    exchange_code: str = "XKRX",
+) -> set[str]:
+    return {
+        trading_day.isoformat()
+        for trading_day in get_trading_days_between(loader, start_date, end_date, exchange_code=exchange_code)
+    }
+
+
+def is_valid_price_row(
+    row: dict[str, Any],
+    market_is_open: bool | None = None,
+    require_source: bool = False,
+) -> bool:
+    close_price = _to_float(row.get("close_price"))
+    volume = _to_float(row.get("volume"))
+    trading_value = _to_float(row.get("trading_value"))
+    if require_source and not row.get("source"):
+        return False
     return (
-        row.get("close_price") not in (None, "")
-        and row.get("volume") not in (None, "")
-        and row.get("trading_value") not in (None, "")
-        and float(row.get("volume") or 0) > 0
-        and float(row.get("trading_value") or 0) > 0
+        close_price is not None
+        and close_price > 0
+        and volume is not None
+        and volume > 0
+        and trading_value is not None
+        and trading_value > 0
     )
+
+
+def scan_invalid_price_rows(
+    loader: SupabaseLoader,
+    target_date: date,
+    lookback_days: int = 180,
+) -> dict[str, Any]:
+    start_date = target_date - timedelta(days=lookback_days)
+    rows = _fetch_rows(
+        loader,
+        "normalized_stock_prices_daily",
+        "base_date",
+        start_date.isoformat(),
+        target_date.isoformat(),
+        order_col="base_date",
+        desc=False,
+    )
+    master_map = _load_master_market_map(loader)
+    trading_days = load_trading_day_strings(loader, start_date, target_date, exchange_code="XKRX")
+    market_rows = []
+    for row in rows:
+        symbol = normalize_symbol_value(row.get("symbol"))
+        market, _asset_type = master_map.get(symbol, (None, None))
+        if market in {"KOSPI", "KOSDAQ", "ETF", "ETN"}:
+            copied = dict(row)
+            copied["symbol"] = symbol
+            copied["market"] = market
+            market_rows.append(copied)
+
+    non_trading_rows = [
+        row for row in market_rows if str(row.get("base_date") or "")[:10] not in trading_days
+    ]
+    zero_close_rows = [
+        row for row in market_rows if (_to_float(row.get("close_price")) or 0) <= 0
+    ]
+    null_source_rows = [row for row in market_rows if not row.get("source")]
+
+    row_lookup = {
+        (row["symbol"], str(row.get("base_date") or "")[:10]): row
+        for row in market_rows
+    }
+    duplicate_weekend_carry_rows = []
+    for row in non_trading_rows:
+        base_date_str = str(row.get("base_date") or "")[:10]
+        try:
+            base_dt = date.fromisoformat(base_date_str)
+        except ValueError:
+            continue
+        previous_trading_day = get_latest_trading_day_on_or_before(
+            loader,
+            base_dt - timedelta(days=1),
+            exchange_code="XKRX",
+        )
+        if previous_trading_day is None:
+            continue
+        prev_row = row_lookup.get((row["symbol"], previous_trading_day.isoformat()))
+        if not prev_row:
+            continue
+        if (
+            _to_float(prev_row.get("close_price")) == _to_float(row.get("close_price"))
+            and _to_float(prev_row.get("volume")) == _to_float(row.get("volume"))
+            and _to_float(prev_row.get("trading_value")) == _to_float(row.get("trading_value"))
+        ):
+            duplicate_weekend_carry_rows.append(row)
+
+    recent_cutoff = target_date - timedelta(days=30)
+    recent_invalid_rows = [
+        row
+        for row in market_rows
+        if any(
+            row in bucket
+            for bucket in (non_trading_rows, zero_close_rows, null_source_rows)
+        )
+        and date.fromisoformat(str(row.get("base_date") or "")[:10]) >= recent_cutoff
+    ]
+
+    status = "SUCCESS"
+    if recent_invalid_rows:
+        status = "FAIL_INVALID_PRICE_ROWS"
+    elif non_trading_rows or zero_close_rows or null_source_rows:
+        status = "WARN_INVALID_PRICE_ROWS"
+
+    return {
+        "non_trading_day_price_rows": len(non_trading_rows),
+        "zero_close_rows": len(zero_close_rows),
+        "null_source_rows": len(null_source_rows),
+        "duplicate_weekend_carry_rows": len(duplicate_weekend_carry_rows),
+        "sample_non_trading_rows": non_trading_rows[:10],
+        "sample_zero_close_rows": zero_close_rows[:10],
+        "sample_null_source_rows": null_source_rows[:10],
+        "sample_duplicate_weekend_carry_rows": duplicate_weekend_carry_rows[:10],
+        "status": status,
+    }
 
 
 def _load_master_market_map(loader: SupabaseLoader) -> dict[str, tuple[str | None, str | None]]:
