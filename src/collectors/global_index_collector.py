@@ -64,7 +64,47 @@ class GlobalIndexCollector:
                 else:
                     result[f"{key}_change_rate"] = None
 
-            result.update(self._fetch_korean_market_snapshot(target_date))
+            kis_data = self._fetch_korean_market_snapshot(target_date)
+            
+            for prefix, ranges in [("kospi", (1000, 6500)), ("kosdaq", (300, 1800))]:
+                if prefix in skipped:
+                    continue
+                
+                yf_val = result.get(prefix)
+                kis_val = kis_data.get(prefix)
+                
+                yf_valid = yf_val is not None and ranges[0] <= yf_val <= ranges[1]
+                kis_valid = kis_val is not None and ranges[0] <= kis_val <= ranges[1]
+                
+                final_val = None
+                source = None
+                quality_flag = "OK"
+                
+                if yf_valid:
+                    final_val = yf_val
+                    source = "YAHOO"
+                    if kis_valid and abs(yf_val - kis_val) / yf_val > 0.05:
+                        quality_flag = "SOURCE_MISMATCH"
+                elif kis_valid:
+                    final_val = kis_val
+                    source = "KIS"
+                else:
+                    quality_flag = "INVALID" if (yf_val or kis_val) else "MISSING"
+                    source = "UNKNOWN"
+                    
+                result[prefix] = final_val
+                result[f"{prefix}_source"] = source
+                result[f"{prefix}_quality_flag"] = quality_flag
+                result[f"{prefix}_source_date"] = target_date.strftime("%Y-%m-%d")
+                
+                # Assign net buy fields from KIS
+                for suffix in ["individual_net_buy", "foreign_net_buy", "institutional_net_buy"]:
+                    result[f"{prefix}_{suffix}"] = kis_data.get(f"{prefix}_{suffix}")
+                
+                # Override change_rate if KIS was chosen
+                if final_val == kis_val and not yf_valid and kis_valid:
+                    result[f"{prefix}_change_rate"] = kis_data.get(f"{prefix}_change_rate")
+
             return result
         except Exception as exc:
             logger.error(f"Error fetching Global Indices: {exc}")

@@ -41,6 +41,7 @@ jobs:
           python scripts/apply_schema_migrations.py || echo "Schema migration skipped; continuing"
           python -m src.pipelines.collect_ecos_macro --all
           python src/jobs/run_daily_macro_pipeline.py
+          python src/jobs/run_intraday_macro_pipeline.py
           python src/jobs/run_daily_derivatives_pipeline.py
           python -m src.jobs.run_daily_kis_universe_pipeline --limit 100
           python src/jobs/run_daily_feature_pipeline.py

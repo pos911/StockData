@@ -178,6 +178,11 @@ def apply_schema_migrations() -> None:
         statements.append(RAW_ECOS_MACRO_DAILY_TABLE_SQL)
         statements.append(RAW_STOCK_SHORT_SELLING_TABLE_SQL)
         statements.append(SNAPSHOT_AND_RANKING_TABLE_SQL)
+        
+        # New intraday macro SQL
+        statements.append((Path(__file__).resolve().parents[1] / "sql" / "add_normalized_macro_intraday.sql").read_text(encoding="utf-8"))
+        statements.append((Path(__file__).resolve().parents[1] / "sql" / "add_global_macro_quality_flags.sql").read_text(encoding="utf-8"))
+
         statements.append("NOTIFY pgrst, 'reload schema';")
 
         with psycopg2.connect(connection_string, connect_timeout=10) as conn:

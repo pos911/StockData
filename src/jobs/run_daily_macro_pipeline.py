@@ -450,20 +450,63 @@ def run_pipeline(target_date: date, dry_run: bool = False):
     us3y = fetch_latest_series_value_or_fred(loader, fred, "DGS3", target_date)
 
     ecos_usdkrw = fetch_latest_normalized_macro_value(loader, "USDKRW", target_date)
-    if global_data and ecos_usdkrw and ecos_usdkrw.get("value") is not None:
-        global_data["usdkrw"] = float(ecos_usdkrw["value"])
+    usdkrw_val = None
+    usdkrw_source = "UNKNOWN"
+    usdkrw_quality_flag = "MISSING"
+    usdkrw_source_date = None
+    
+    if ecos_usdkrw and ecos_usdkrw.get("value") is not None:
+        ecos_date_str = str(ecos_usdkrw["base_date"])[:10]
+        try:
+            stale_days = (target_date - date.fromisoformat(ecos_date_str)).days
+        except ValueError:
+            stale_days = 99
+            
+        yf_usdkrw = global_data.get("usdkrw") if global_data else None
+        
+        if stale_days > 2 and yf_usdkrw is not None:
+            usdkrw_val = float(yf_usdkrw)
+            usdkrw_source = "YAHOO"
+            usdkrw_quality_flag = "OK"
+            usdkrw_source_date = target_date.strftime("%Y-%m-%d")
+        else:
+            usdkrw_val = float(ecos_usdkrw["value"])
+            usdkrw_source = "ECOS"
+            usdkrw_quality_flag = "OK" if stale_days <= 2 else "STALE"
+            usdkrw_source_date = ecos_date_str
+    elif global_data and global_data.get("usdkrw") is not None:
+        usdkrw_val = float(global_data["usdkrw"])
+        usdkrw_source = "YAHOO"
+        usdkrw_quality_flag = "OK"
+        usdkrw_source_date = target_date.strftime("%Y-%m-%d")
 
     if global_data:
+        global_data["usdkrw"] = usdkrw_val
+
+    if global_data:
+        macro_quality_flag = "OK"
+        if global_data.get("kospi_quality_flag") == "INVALID" or global_data.get("kosdaq_quality_flag") == "INVALID":
+            macro_quality_flag = "WARN_INVALID_INDEX"
+            
         global_record = {
             "base_date": global_data.get("base_date"),
             "usdkrw": global_data.get("usdkrw"),
+            "usdkrw_source": usdkrw_source,
+            "usdkrw_source_date": usdkrw_source_date,
+            "usdkrw_quality_flag": usdkrw_quality_flag,
             "dxy": global_data.get("dxy"),
             "us10y": us10y,
             "us3y": us3y,
             "kr10y": kr10y,
             "kospi": global_data.get("kospi"),
+            "kospi_source": global_data.get("kospi_source"),
+            "kospi_source_date": global_data.get("kospi_source_date"),
+            "kospi_quality_flag": global_data.get("kospi_quality_flag"),
             "kospi_change_rate": global_data.get("kospi_change_rate"),
             "kosdaq": global_data.get("kosdaq"),
+            "kosdaq_source": global_data.get("kosdaq_source"),
+            "kosdaq_source_date": global_data.get("kosdaq_source_date"),
+            "kosdaq_quality_flag": global_data.get("kosdaq_quality_flag"),
             "kosdaq_change_rate": global_data.get("kosdaq_change_rate"),
             "wti": global_data.get("wti"),
             "brent": global_data.get("brent"),
@@ -483,6 +526,7 @@ def run_pipeline(target_date: date, dry_run: bool = False):
             "kosdaq_individual_net_buy": global_data.get("kosdaq_individual_net_buy"),
             "kosdaq_foreign_net_buy": global_data.get("kosdaq_foreign_net_buy"),
             "kosdaq_institutional_net_buy": global_data.get("kosdaq_institutional_net_buy"),
+            "macro_quality_flag": macro_quality_flag,
             "available_at": available_at.isoformat(),
         }
         logger.info(

@@ -1668,7 +1668,111 @@ def verify_data(target_date: date | None = None):
     _print_stock_detail_universe_quality(config, loader)
     _print_report_required_etf_coverage(loader, today)
     _print_report_source_quality(loader, today)
+    _print_intraday_macro_quality(loader, today)
+    _print_macro_index_source_quality(loader, today)
     _macro_series_status(loader, today)
+
+
+def _print_intraday_macro_quality(loader: SupabaseLoader, today: date):
+    print("\n=== INTRADAY MACRO QUALITY ===")
+    target_date = today.isoformat()
+    try:
+        rows = (
+            loader.client.table("normalized_macro_intraday")
+            .select("*")
+            .eq("base_date", target_date)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        print("status=FAIL_INTRADAY_SCHEMA_MISSING")
+        return
+
+    latest_observed_at = None
+    series_map = {}
+    invalid_count = 0
+    for row in rows:
+        sid = row.get("series_id")
+        obs = row.get("observed_at")
+        if not latest_observed_at or (obs and obs > latest_observed_at):
+            latest_observed_at = obs
+        if sid not in series_map or (obs and obs > series_map[sid].get("observed_at", "")):
+            series_map[sid] = row
+        if row.get("quality_flag") == "INVALID":
+            invalid_count += 1
+
+    stale_minutes = 0
+    if latest_observed_at:
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(latest_observed_at.replace("Z", "+00:00"))
+            stale_minutes = int((datetime.now(timezone.utc) - dt).total_seconds() / 60)
+        except Exception:
+            pass
+
+    def _fmt(s):
+        row = series_map.get(s, {})
+        return f"{row.get('value')}/{row.get('source')}/{row.get('source_symbol')}/{row.get('quality_flag')}"
+
+    print(f"target_date={target_date}")
+    print(f"latest_observed_at={latest_observed_at}")
+    print(f"stale_minutes={stale_minutes}")
+    print(f"KOSPI={_fmt('KOSPI')}")
+    print(f"KOSDAQ={_fmt('KOSDAQ')}")
+    print(f"USDKRW={_fmt('USDKRW')}")
+    print(f"invalid_count={invalid_count}")
+
+    usdkrw_q = series_map.get("USDKRW", {}).get("quality_flag")
+    kospi_q = series_map.get("KOSPI", {}).get("quality_flag")
+    kosdaq_q = series_map.get("KOSDAQ", {}).get("quality_flag")
+
+    xkrx_open = is_market_open(loader, today, "XKRX")
+    
+    if not series_map.get("USDKRW"):
+        print("status=FAIL_MISSING_INTRADAY_FX")
+    elif usdkrw_q == "INVALID" or kospi_q == "INVALID" or kosdaq_q == "INVALID":
+        print("status=FAIL_INVALID_INTRADAY_MACRO")
+    elif not xkrx_open and (not series_map.get("KOSPI") or not series_map.get("KOSDAQ")):
+        print("status=SKIPPED_MARKET_CLOSED")
+    elif xkrx_open and (not series_map.get("KOSPI") or not series_map.get("KOSDAQ")):
+        print("status=WARN_MISSING_INTRADAY_INDEX")
+    elif stale_minutes > 90:
+        print("status=WARN_STALE_INTRADAY_MACRO")
+    else:
+        print("status=SUCCESS")
+
+def _print_macro_index_source_quality(loader: SupabaseLoader, today: date):
+    print("\n=== MACRO INDEX SOURCE QUALITY ===")
+    try:
+        row = (
+            loader.client.table("normalized_global_macro_daily")
+            .select("base_date, kospi, kospi_source, kospi_quality_flag, kosdaq, kosdaq_source, kosdaq_quality_flag, usdkrw, usdkrw_source, usdkrw_quality_flag")
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+    except Exception:
+        print("status=FAIL_SCHEMA_MISSING")
+        return
+
+    if not row:
+        print("status=FAIL_EMPTY")
+        return
+
+    r = row[0]
+    print(f"base_date={r.get('base_date')}")
+    print(f"kospi={r.get('kospi')} / source={r.get('kospi_source')} / quality={r.get('kospi_quality_flag')}")
+    print(f"kosdaq={r.get('kosdaq')} / source={r.get('kosdaq_source')} / quality={r.get('kosdaq_quality_flag')}")
+    print(f"usdkrw={r.get('usdkrw')} / source={r.get('usdkrw_source')} / quality={r.get('usdkrw_quality_flag')}")
+
+    if r.get("kospi_quality_flag") == "INVALID":
+        print("status=FAIL_INVALID_KOSPI")
+    elif r.get("usdkrw_quality_flag") == "STALE":
+        print("status=WARN_STALE_USDKRW")
+    else:
+        print("status=SUCCESS")
 
 
 if __name__ == "__main__":
