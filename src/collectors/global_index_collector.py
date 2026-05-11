@@ -128,6 +128,8 @@ class GlobalIndexCollector:
         return len(close) - 1
 
     def _fetch_korean_market_snapshot(self, target_date: date) -> Dict[str, Any]:
+        # This will be kept around for backward compatibility internally,
+        # but we will fetch index levels and flows separately now.
         empty = {
             "kospi": None,
             "kospi_change_rate": None,
@@ -143,13 +145,61 @@ class GlobalIndexCollector:
         kis_config = self.config.get("kis", {})
         if not kis_config.get("app_key") or not kis_config.get("app_secret"):
             return empty
+        
         try:
-            return self._fetch_korean_market_snapshot_from_kis(target_date)
+            levels = self.fetch_korean_index_levels_from_kis(target_date)
+            flows = self.fetch_korean_market_flows_from_kis(target_date)
+            return {**empty, **levels, **flows}
         except Exception as exc:
             logger.warning(f"Failed to fetch Korean market snapshot from KIS: {exc}")
             return empty
 
-    def _fetch_korean_market_snapshot_from_kis(self, target_date: date) -> Dict[str, Any]:
+    def fetch_kis_index_price(self, index_code: str, target_date: Optional[date] = None) -> Optional[Dict[str, Any]]:
+        token = asyncio.run(self._get_kis_access_token())
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": self.config["kis"]["app_key"],
+            "appsecret": self.config["kis"]["app_secret"],
+            "tr_id": "FHPUP02100000",
+            "custtype": "P",
+        }
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "U",
+            "FID_INPUT_ISCD": index_code,
+        }
+        try:
+            response = requests.get(
+                "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-index-price",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("rt_cd") != "0":
+                logger.warning(f"KIS index price API error: {payload.get('msg1')}")
+                return None
+            return payload.get("output", {})
+        except Exception as exc:
+            logger.error(f"Error calling KIS inquire-index-price: {exc}")
+            return None
+
+    def fetch_korean_index_levels_from_kis(self, target_date: date) -> Dict[str, Any]:
+        result = {}
+        # 0001 = KOSPI, 1001 = KOSDAQ
+        kospi_out = self.fetch_kis_index_price("0001", target_date)
+        if kospi_out:
+            result["kospi"] = self._to_float(kospi_out.get("bstp_nmix_prpr"))
+            result["kospi_change_rate"] = self._to_float(kospi_out.get("bstp_nmix_prdy_ctrt"))
+            
+        kosdaq_out = self.fetch_kis_index_price("1001", target_date)
+        if kosdaq_out:
+            result["kosdaq"] = self._to_float(kosdaq_out.get("bstp_nmix_prpr"))
+            result["kosdaq_change_rate"] = self._to_float(kosdaq_out.get("bstp_nmix_prdy_ctrt"))
+        return result
+
+    def fetch_korean_market_flows_from_kis(self, target_date: date) -> Dict[str, Any]:
         token = asyncio.run(self._get_kis_access_token())
         headers = {
             "content-type": "application/json; charset=utf-8",
@@ -168,8 +218,6 @@ class GlobalIndexCollector:
             row = self._fetch_market_daily_row(headers, target, market_code, market_name)
             if not row:
                 continue
-            result[f"{prefix}"] = self._to_float(row.get("bstp_nmix_prpr"))
-            result[f"{prefix}_change_rate"] = self._to_float(row.get("bstp_nmix_prdy_ctrt"))
             result[f"{prefix}_individual_net_buy"] = self._to_float(row.get("prsn_ntby_qty"))
             result[f"{prefix}_foreign_net_buy"] = self._to_float(row.get("frgn_ntby_qty"))
             result[f"{prefix}_institutional_net_buy"] = self._to_float(row.get("orgn_ntby_qty"))

@@ -38,15 +38,79 @@ def diagnose_macro_sources(target_date: date):
         else:
             print(f"{ticker}: NO DATA")
 
-    print("\n--- 3. KIS Market Snapshot ---")
+    print("\n--- 3. KIS Market APIs ---")
     collector = GlobalIndexCollector(config)
+    
+    kis_index_kospi = None
+    kis_index_kosdaq = None
+    kis_investor_kospi = None
+    yahoo_kospi = None
+    
     try:
-        kis_data = collector._fetch_korean_market_snapshot(target_date)
-        print("KIS kospi:", kis_data.get("kospi"))
-        print("KIS kosdaq:", kis_data.get("kosdaq"))
-        # We can't easily print raw KIS rows without intercepting requests, but we know what the collector outputs
+        kospi_idx_raw = collector.fetch_kis_index_price("0001", target_date)
+        print("KIS inquire-index-price KOSPI (0001) raw:", kospi_idx_raw)
+        if kospi_idx_raw:
+            kis_index_kospi = float(kospi_idx_raw.get("bstp_nmix_prpr", 0))
+            
+        kosdaq_idx_raw = collector.fetch_kis_index_price("1001", target_date)
+        print("KIS inquire-index-price KOSDAQ (1001) raw:", kosdaq_idx_raw)
+        if kosdaq_idx_raw:
+            kis_index_kosdaq = float(kosdaq_idx_raw.get("bstp_nmix_prpr", 0))
+            
+        # For investor-daily-by-market, we need to manually call it or use the flow method which doesn't return raw easily anymore.
+        # But we can call _fetch_market_daily_row directly
+        import asyncio
+        token = asyncio.run(collector._get_kis_access_token())
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": config["kis"]["app_key"],
+            "appsecret": config["kis"]["app_secret"],
+            "tr_id": "FHPTJ04040000",
+            "custtype": "P",
+        }
+        kospi_inv_raw = collector._fetch_market_daily_row(headers, target_date.strftime("%Y%m%d"), "0001", "KSP")
+        print("KIS inquire-investor-daily-by-market KOSPI raw:", kospi_inv_raw)
+        if kospi_inv_raw:
+            kis_investor_kospi = float(kospi_inv_raw.get("bstp_nmix_prpr", 0))
+            
     except Exception as e:
         print("Failed to fetch from KIS:", e)
+        
+    print("\n--- 3.5 Final Evaluation ---")
+    df = yf.Ticker("^KS11").history(period="1d", interval="1m")
+    if not df.empty:
+        yahoo_kospi = float(df.iloc[-1]["Close"])
+        
+    print(f"kis_index_price_kospi: {kis_index_kospi}")
+    print(f"kis_index_price_kosdaq: {kis_index_kosdaq}")
+    print(f"kis_investor_market_snapshot_kospi: {kis_investor_kospi}")
+    print(f"yahoo_kospi: {yahoo_kospi}")
+    
+    final_val = None
+    source = "UNKNOWN"
+    quality = "MISSING"
+    
+    if kis_index_kospi is not None and 1000 <= kis_index_kospi <= 6500:
+        final_val = kis_index_kospi
+        source = "KIS"
+        quality = "OK"
+    elif yahoo_kospi is not None and 1000 <= yahoo_kospi <= 6500:
+        final_val = yahoo_kospi
+        source = "YAHOO"
+        quality = "FALLBACK_YAHOO" if kis_index_kospi is None else "OK" # In our collector logic, it's INVALID if out of bounds. But wait, if KIS fails, it's FALLBACK.
+    else:
+        # If kis returned something but out of bounds
+        if kis_index_kospi is not None:
+            source = "KIS"
+            quality = "INVALID"
+        elif yahoo_kospi is not None:
+            source = "YAHOO"
+            quality = "INVALID"
+            
+    print(f"final_selected_kospi: {final_val}")
+    print(f"final_selected_source: {source}")
+    print(f"final_quality_flag: {quality}")
 
     print("\n--- 4. Supabase: normalized_macro_series ---")
     for series in ["USDKRW", "DEXKOUS", "KRW=X"]:

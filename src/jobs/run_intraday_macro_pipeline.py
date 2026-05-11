@@ -21,7 +21,7 @@ def run_pipeline(target_date: date, dry_run: bool = False):
     config = load_config()
     loader = SupabaseLoader(url=config["supabase"]["url"], key=config["supabase"]["service_role_key"])
     
-    collector = IntradayMacroCollector()
+    collector = IntradayMacroCollector(config)
     results = collector.fetch_snapshots(target_date)
     
     if not results:

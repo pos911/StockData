@@ -1729,10 +1729,16 @@ def _print_intraday_macro_quality(loader: SupabaseLoader, today: date):
 
     xkrx_open = is_market_open(loader, today, "XKRX")
     
+    kospi_source = series_map.get("KOSPI", {}).get("source")
+    
     if not series_map.get("USDKRW"):
         print("status=FAIL_MISSING_INTRADAY_FX")
     elif usdkrw_q == "INVALID" or kospi_q == "INVALID" or kosdaq_q == "INVALID":
         print("status=FAIL_INVALID_INTRADAY_MACRO")
+    elif kospi_source == "YAHOO" and kospi_q == "OK":
+        print("status=FAIL_WRONG_KOSPI_SOURCE")
+    elif kospi_q == "FALLBACK_YAHOO":
+        print("status=WARN_KOSPI_FALLBACK_YAHOO")
     elif not xkrx_open and (not series_map.get("KOSPI") or not series_map.get("KOSDAQ")):
         print("status=SKIPPED_MARKET_CLOSED")
     elif xkrx_open and (not series_map.get("KOSPI") or not series_map.get("KOSDAQ")):
@@ -1767,8 +1773,15 @@ def _print_macro_index_source_quality(loader: SupabaseLoader, today: date):
     print(f"kosdaq={r.get('kosdaq')} / source={r.get('kosdaq_source')} / quality={r.get('kosdaq_quality_flag')}")
     print(f"usdkrw={r.get('usdkrw')} / source={r.get('usdkrw_source')} / quality={r.get('usdkrw_quality_flag')}")
 
-    if r.get("kospi_quality_flag") == "INVALID":
+    kospi_q = r.get("kospi_quality_flag")
+    kospi_s = r.get("kospi_source")
+    
+    if kospi_q == "INVALID":
         print("status=FAIL_INVALID_KOSPI")
+    elif kospi_s == "YAHOO" and kospi_q == "OK":
+        print("status=FAIL_WRONG_KOSPI_SOURCE")
+    elif kospi_q == "FALLBACK_YAHOO" or (kospi_s == "YAHOO" and kospi_q != "INVALID"):
+        print("status=WARN_KOSPI_FALLBACK_YAHOO")
     elif r.get("usdkrw_quality_flag") == "STALE":
         print("status=WARN_STALE_USDKRW")
     else:
