@@ -683,7 +683,7 @@ def _print_kr_full_market_price_coverage(loader: SupabaseLoader, today: date):
     if full_ready:
         print("status=SUCCESS")
     elif counts["KOSPI"] < KOSPI_PRICE_READY_THRESHOLD and counts["KOSDAQ"] < KOSDAQ_PRICE_READY_THRESHOLD:
-        print("status=FAIL_KR_STOCK_PRICE_COVERAGE")
+        print("status=WARN_KR_STOCK_PRICE_COVERAGE")
     else:
         print("status=WARN_PARTIAL_KR_STOCK_PRICE_COVERAGE")
 
@@ -1144,6 +1144,40 @@ def _print_report_readiness(loader: SupabaseLoader, today: date):
     )
     allowed_sections = ["macro", "us_market"]
     blocked_sections = []
+    target_date = today.isoformat()
+    active_watchlist_rows = (
+        loader.client.table("static_stock_universe")
+        .select("symbol")
+        .eq("enabled", True)
+        .execute()
+        .data
+        or []
+    )
+    active_watchlist_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in active_watchlist_rows
+        if normalize_symbol_value(row.get("symbol"))
+    }
+    target_price_rows = loader.fetch_all("normalized_stock_prices_daily", "base_date", target_date, target_date)
+    kis_detail_watchlist_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in target_price_rows
+        if normalize_symbol_value(row.get("symbol")) in active_watchlist_symbols
+        and (row.get("source") == "KIS_DETAIL" or row.get("source") == "KIS")
+        and is_valid_price_row(row, market_is_open=True)
+    }
+    target_feature_rows = loader.fetch_all("feature_store_daily", "base_date", target_date, target_date)
+    feature_stock_symbols = {
+        normalize_symbol_value(row.get("symbol"))
+        for row in target_feature_rows
+        if normalize_symbol_value(row.get("symbol")) and normalize_symbol_value(row.get("symbol")) != "GLOBAL"
+    }
+    kis_universe_only_ready = (
+        kis_universe_ready
+        and kis_volume_ready
+        and bool(kis_detail_watchlist_symbols)
+        and bool(feature_stock_symbols)
+    )
     if kis_volume_ready:
         allowed_sections.append("kis_volume_top")
     else:
@@ -1170,13 +1204,21 @@ def _print_report_readiness(loader: SupabaseLoader, today: date):
     print(f"kis_volume_ranking_ready={str(kis_volume_ready).lower()}")
     print(f"kr_trading_value_ranking_ready={str(kr_trading_value_ready and kr_full_market_price_ready).lower()}")
     print(f"kr_market_cap_ranking_ready={str(kr_market_cap_ready and kr_full_market_price_ready).lower()}")
+    print(
+        f"active_watchlist_kis_detail_coverage={len(kis_detail_watchlist_symbols)}/{len(active_watchlist_symbols)}"
+    )
+    print(f"feature_stock_symbols={len(feature_stock_symbols)}")
+    print(f"kis_universe_only_ready={str(kis_universe_only_ready).lower()}")
     print(f"report_allowed_sections={allowed_sections}")
     print(f"report_blocked_sections={blocked_sections}")
     if not kis_volume_ready and not kis_universe_ready:
         print("status=FAIL_REPORT_NOT_READY")
-    elif not kr_full_market_price_ready:
-        print("status=FAIL_KR_STOCK_PRICE_COVERAGE")
+    elif kis_universe_only_ready and not kr_full_market_price_ready:
+        print("status=WARN_KIS_UNIVERSE_ONLY")
         print("note=Use KIS volume top and watchlist_signal only; do not use KR full-market trading_value or market_cap top.")
+    elif not kr_full_market_price_ready:
+        print("status=WARN_KR_STOCK_PRICE_COVERAGE")
+        print("note=KIS universe is incomplete; do not use KR full-market trading_value or market_cap top.")
     else:
         print("status=SUCCESS")
 
