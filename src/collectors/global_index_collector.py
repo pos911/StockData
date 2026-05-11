@@ -65,45 +65,52 @@ class GlobalIndexCollector:
                     result[f"{key}_change_rate"] = None
 
             kis_data = self._fetch_korean_market_snapshot(target_date)
-            
-            for prefix, ranges in [("kospi", (1000, 6500)), ("kosdaq", (300, 1800))]:
+
+            from src.utils.market_sanity import classify_index_quality, is_hard_invalid_index_value
+
+            for prefix in ("kospi", "kosdaq"):
                 if prefix in skipped:
                     continue
-                
+
                 yf_val = result.get(prefix)
                 kis_val = kis_data.get(prefix)
-                
-                yf_valid = yf_val is not None and ranges[0] <= yf_val <= ranges[1]
-                kis_valid = kis_val is not None and ranges[0] <= kis_val <= ranges[1]
-                
+                kis_change_rate = kis_data.get(f"{prefix}_change_rate")
+
+                # KIS is the official primary source for Korean indices
+                # Validity: must be positive — no upper bound rejection
+                def _valid(v):
+                    return v is not None and not is_hard_invalid_index_value(v)
+
                 final_val = None
-                source = None
-                quality_flag = "OK"
-                
-                if yf_valid:
-                    final_val = yf_val
-                    source = "YAHOO"
-                    if kis_valid and abs(yf_val - kis_val) / yf_val > 0.05:
-                        quality_flag = "SOURCE_MISMATCH"
-                elif kis_valid:
+                source = "UNKNOWN"
+                quality_flag = "MISSING"
+
+                if _valid(kis_val):
                     final_val = kis_val
                     source = "KIS"
+                    quality_flag = classify_index_quality(
+                        value=kis_val,
+                        source="KIS",
+                        source_change_rate=kis_change_rate,
+                        secondary_value=yf_val if _valid(yf_val) else None,
+                    )
+                    # Override change_rate with KIS value
+                    result[f"{prefix}_change_rate"] = kis_change_rate
+                elif _valid(yf_val):
+                    final_val = yf_val
+                    source = "YAHOO"
+                    quality_flag = "FALLBACK_YAHOO"
                 else:
-                    quality_flag = "INVALID" if (yf_val or kis_val) else "MISSING"
-                    source = "UNKNOWN"
-                    
+                    quality_flag = "MISSING"
+
                 result[prefix] = final_val
                 result[f"{prefix}_source"] = source
                 result[f"{prefix}_quality_flag"] = quality_flag
                 result[f"{prefix}_source_date"] = target_date.strftime("%Y-%m-%d")
-                
-                # Assign net buy fields from KIS
+
+                # Net buy flows from KIS (supplementary data only)
                 for suffix in ["individual_net_buy", "foreign_net_buy", "institutional_net_buy"]:
                     result[f"{prefix}_{suffix}"] = kis_data.get(f"{prefix}_{suffix}")
-                
-                # Override change_rate if KIS was chosen
-                if final_val == kis_val and not yf_valid and kis_valid:
-                    result[f"{prefix}_change_rate"] = kis_data.get(f"{prefix}_change_rate")
 
             return result
         except Exception as exc:

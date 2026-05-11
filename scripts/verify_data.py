@@ -1728,17 +1728,33 @@ def _print_intraday_macro_quality(loader: SupabaseLoader, today: date):
     kosdaq_q = series_map.get("KOSDAQ", {}).get("quality_flag")
 
     xkrx_open = is_market_open(loader, today, "XKRX")
-    
+
     kospi_source = series_map.get("KOSPI", {}).get("source")
-    
+    kospi_value  = series_map.get("KOSPI", {}).get("value")
+    kospi_detail = series_map.get("KOSPI", {}).get("quality_detail") or {}
+
+    # Detect legacy INVALID rows that should have been OK (raw_value > 0, KIS source)
+    reclassify_needed = (
+        kospi_q == "INVALID"
+        and kospi_source == "KIS"
+        and isinstance(kospi_detail.get("raw_value"), (int, float))
+        and kospi_detail.get("raw_value", 0) > 0
+    )
+
     if not series_map.get("USDKRW"):
         print("status=FAIL_MISSING_INTRADAY_FX")
-    elif usdkrw_q == "INVALID" or kospi_q == "INVALID" or kosdaq_q == "INVALID":
+    elif reclassify_needed:
+        # Value is valid but tagged wrong — flag for reclassification, not hard fail
+        print(f"status=WARN_RECLASSIFY_NEEDED (KOSPI raw_value={kospi_detail.get('raw_value')} was INVALID by bad range rule)")
+    elif kospi_q == "INVALID" or kosdaq_q == "INVALID":
+        # True INVALID: value is null, zero, or negative
         print("status=FAIL_INVALID_INTRADAY_MACRO")
-    elif kospi_source == "YAHOO" and kospi_q == "OK":
-        print("status=FAIL_WRONG_KOSPI_SOURCE")
+    elif usdkrw_q == "INVALID":
+        print("status=FAIL_INVALID_INTRADAY_FX")
     elif kospi_q == "FALLBACK_YAHOO":
         print("status=WARN_KOSPI_FALLBACK_YAHOO")
+    elif kospi_q in ("ANOMALY", "SOURCE_MISMATCH"):
+        print(f"status=WARN_KOSPI_{kospi_q}")
     elif not xkrx_open and (not series_map.get("KOSPI") or not series_map.get("KOSDAQ")):
         print("status=SKIPPED_MARKET_CLOSED")
     elif xkrx_open and (not series_map.get("KOSPI") or not series_map.get("KOSDAQ")):
@@ -1775,13 +1791,18 @@ def _print_macro_index_source_quality(loader: SupabaseLoader, today: date):
 
     kospi_q = r.get("kospi_quality_flag")
     kospi_s = r.get("kospi_source")
-    
-    if kospi_q == "INVALID":
+    kospi_v = r.get("kospi")
+
+    if kospi_q == "INVALID" and (kospi_v is None or (isinstance(kospi_v, (int, float)) and kospi_v <= 0)):
+        # True INVALID: value is null or non-positive
         print("status=FAIL_INVALID_KOSPI")
-    elif kospi_s == "YAHOO" and kospi_q == "OK":
-        print("status=FAIL_WRONG_KOSPI_SOURCE")
-    elif kospi_q == "FALLBACK_YAHOO" or (kospi_s == "YAHOO" and kospi_q != "INVALID"):
+    elif kospi_q == "INVALID" and kospi_s == "KIS" and isinstance(kospi_v, (int, float)) and kospi_v > 0:
+        # Mislabelled by old range rule — warn, don't fail hard
+        print(f"status=WARN_RECLASSIFY_NEEDED (kospi={kospi_v} is positive but tagged INVALID)")
+    elif kospi_q == "FALLBACK_YAHOO" or (kospi_s == "YAHOO" and kospi_q not in ("INVALID", None)):
         print("status=WARN_KOSPI_FALLBACK_YAHOO")
+    elif kospi_q in ("ANOMALY", "SOURCE_MISMATCH"):
+        print(f"status=WARN_KOSPI_{kospi_q}")
     elif r.get("usdkrw_quality_flag") == "STALE":
         print("status=WARN_STALE_USDKRW")
     else:
