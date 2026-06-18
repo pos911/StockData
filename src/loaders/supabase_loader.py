@@ -24,6 +24,7 @@ TABLE_CONFLICT_KEYS = {
     "normalized_stock_events_daily": ["symbol", "base_date", "event_type"],
     "normalized_macro_series": ["series_id", "base_date"],
     "normalized_global_macro_daily": ["base_date"],
+    "normalized_macro_intraday": ["observed_at", "series_id", "source"],
     "market_breadth_daily": ["base_date"],
     "normalized_derivatives_daily": ["base_date"],
     "market_trading_calendar": ["calendar_date", "exchange_code"],
